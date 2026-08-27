@@ -313,7 +313,13 @@ export function LiveRoomClient({
   const [isSending, setIsSending] = useState(false);
 
   const chatBottomRef = useRef<HTMLDivElement>(null);
-  const lastSignalTimeRef = useRef<string>(new Date(Date.now() - 20000).toISOString());
+  const lastSignalIdRef = useRef<string | null>(null);
+  const [debugLog, setDebugLog] = useState<string[]>([]);
+  const addDebug = (msg: string) => {
+    const ts = new Date().toLocaleTimeString();
+    console.log(`[LiveRoom ${ts}]`, msg);
+    setDebugLog((prev) => [...prev.slice(-20), `${ts}: ${msg}`]);
+  };
 
   const triggerNotification = (text: string) => {
     setRoomNotification(text);
@@ -345,18 +351,14 @@ export function LiveRoomClient({
 
       // Handle receiving remote tracks
       pc.ontrack = (event) => {
-        console.log("WebRTC ontrack received:", event.track.kind, "from peer", peerId);
-        const rStream = event.streams && event.streams[0] ? event.streams[0] : new MediaStream([event.track]);
+        addDebug(`ontrack: ${event.track.kind} from ${peerId.slice(0, 8)} readyState=${event.track.readyState}`);
         setRemoteStreams((prev) => {
           const next = new Map(prev);
-          const existing = next.get(peerId);
-          if (existing) {
-            if (!existing.getTracks().some((t) => t.id === event.track.id)) {
-              existing.addTrack(event.track);
-            }
-            next.set(peerId, new MediaStream(existing.getTracks()));
-          } else {
-            next.set(peerId, rStream);
+          // Always create a fresh MediaStream with all tracks from this peer connection
+          const allReceivers = pc.getReceivers();
+          const allTracks = allReceivers.map((r) => r.track).filter(Boolean);
+          if (allTracks.length > 0) {
+            next.set(peerId, new MediaStream(allTracks));
           }
           return next;
         });
@@ -375,7 +377,17 @@ export function LiveRoomClient({
       };
 
       pc.onconnectionstatechange = () => {
-        if (pc.connectionState === "disconnected" || pc.connectionState === "failed" || pc.connectionState === "closed") {
+        addDebug(`PC ${peerId.slice(0, 8)} connectionState=${pc.connectionState}`);
+        if (pc.connectionState === "failed") {
+          // Auto-retry: close old connection and re-offer
+          addDebug(`Connection FAILED to ${peerId.slice(0, 8)}, will retry...`);
+          pc.close();
+          peerConnections.current.delete(peerId);
+          // Only the deterministic offerer retries
+          if (user.id < peerId) {
+            setTimeout(() => sendOffer(peerId), 1500);
+          }
+        } else if (pc.connectionState === "disconnected" || pc.connectionState === "closed") {
           setRemoteStreams((prev) => {
             const next = new Map(prev);
             next.delete(peerId);
@@ -383,6 +395,14 @@ export function LiveRoomClient({
           });
           peerConnections.current.delete(peerId);
         }
+      };
+
+      pc.oniceconnectionstatechange = () => {
+        addDebug(`PC ${peerId.slice(0, 8)} iceState=${pc.iceConnectionState}`);
+      };
+
+      pc.onsignalingstatechange = () => {
+        addDebug(`PC ${peerId.slice(0, 8)} signalingState=${pc.signalingState}`);
       };
 
       peerConnections.current.set(peerId, pc);
@@ -458,7 +478,9 @@ export function LiveRoomClient({
       });
 
       // Announce join to peers in the room
+      addDebug(`Media acquired: video=${stream.getVideoTracks().length} audio=${stream.getAudioTracks().length}`);
       await sendLiveSignalAction(session.id, null, "join", JSON.stringify({ name: user.name || user.email }));
+      addDebug("Join signal sent");
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : "Camera access denied.";
       setStreamError(msg);
@@ -498,9 +520,10 @@ export function LiveRoomClient({
   useEffect(() => {
     const signalInterval = setInterval(async () => {
       try {
-        const { signals } = await getLiveSignalsAction(session.id, lastSignalTimeRef.current);
+        const { signals } = await getLiveSignalsAction(session.id, lastSignalIdRef.current);
         if (signals && signals.length > 0) {
-          lastSignalTimeRef.current = signals[signals.length - 1].createdAt;
+          lastSignalIdRef.current = signals[signals.length - 1].id;
+          addDebug(`Got ${signals.length} signals: ${signals.map((s) => s.type).join(',')}`);
 
           for (const sig of signals) {
             const senderId = sig.senderId;
@@ -510,8 +533,10 @@ export function LiveRoomClient({
               triggerNotification(`👋 ${info.name || "A participant"} joined`);
 
               // Glare Prevention: Peer with smaller ID initiates offer to peer with larger ID
+              addDebug(`Join from ${senderId.slice(0, 8)}. I am ${user.id.slice(0, 8)}. I offer? ${user.id < senderId}`);
               if (user.id < senderId) {
                 await sendOffer(senderId);
+                addDebug(`Sent OFFER to ${senderId.slice(0, 8)}`);
               }
               sendLiveSignalAction(
                 session.id,
@@ -533,44 +558,62 @@ export function LiveRoomClient({
               });
               setAttendees((prev) => prev.filter((a) => a.id !== senderId));
             } else if (sig.type === "offer") {
-              const pc = getOrCreatePeerConnection(senderId);
-              const offerData = JSON.parse(sig.payload);
+              addDebug(`Received OFFER from ${senderId.slice(0, 8)} sigState=${getOrCreatePeerConnection(senderId).signalingState}`);
+              try {
+                const pc = getOrCreatePeerConnection(senderId);
+                const offerData = JSON.parse(sig.payload);
 
-              // Attach local tracks before answering
-              const stream = screenStreamRef.current || localStreamRef.current;
-              if (stream) {
-                stream.getTracks().forEach((track) => {
-                  const senders = pc.getSenders();
-                  if (!senders.some((s) => s.track?.kind === track.kind)) {
-                    try {
-                      pc.addTrack(track, stream);
-                    } catch {}
-                  }
-                });
-              }
+                // Attach local tracks before answering
+                const stream = screenStreamRef.current || localStreamRef.current;
+                if (stream) {
+                  stream.getTracks().forEach((track) => {
+                    const senders = pc.getSenders();
+                    if (!senders.some((s) => s.track?.kind === track.kind)) {
+                      try {
+                        pc.addTrack(track, stream);
+                      } catch {}
+                    }
+                  });
+                }
 
-              await pc.setRemoteDescription(new RTCSessionDescription(offerData));
+                await pc.setRemoteDescription(new RTCSessionDescription(offerData));
+                addDebug(`Set remote desc (offer) from ${senderId.slice(0, 8)}`);
 
-              // Process queued candidates
-              const queued = iceCandidateQueue.current.get(senderId) || [];
-              for (const cand of queued) {
-                await pc.addIceCandidate(new RTCIceCandidate(cand)).catch(() => {});
-              }
-              iceCandidateQueue.current.delete(senderId);
-
-              const answer = await pc.createAnswer();
-              await pc.setLocalDescription(answer);
-              await sendLiveSignalAction(session.id, senderId, "answer", JSON.stringify(answer));
-            } else if (sig.type === "answer") {
-              const pc = getOrCreatePeerConnection(senderId);
-              const answerData = JSON.parse(sig.payload);
-              if (pc.signalingState === "have-local-offer") {
-                await pc.setRemoteDescription(new RTCSessionDescription(answerData));
+                // Process queued candidates
                 const queued = iceCandidateQueue.current.get(senderId) || [];
+                addDebug(`Processing ${queued.length} queued candidates`);
                 for (const cand of queued) {
                   await pc.addIceCandidate(new RTCIceCandidate(cand)).catch(() => {});
                 }
                 iceCandidateQueue.current.delete(senderId);
+
+                const answer = await pc.createAnswer();
+                await pc.setLocalDescription(answer);
+                await sendLiveSignalAction(session.id, senderId, "answer", JSON.stringify(answer));
+                addDebug(`Sent ANSWER to ${senderId.slice(0, 8)}`);
+              } catch (err) {
+                addDebug(`OFFER ERROR: ${err}`);
+              }
+            } else if (sig.type === "answer") {
+              addDebug(`Received ANSWER from ${senderId.slice(0, 8)}`);
+              try {
+                const pc = getOrCreatePeerConnection(senderId);
+                const answerData = JSON.parse(sig.payload);
+                addDebug(`My signalingState=${pc.signalingState} for ${senderId.slice(0, 8)}`);
+                if (pc.signalingState === "have-local-offer") {
+                  await pc.setRemoteDescription(new RTCSessionDescription(answerData));
+                  addDebug(`Set remote desc (answer) from ${senderId.slice(0, 8)}`);
+                  const queued = iceCandidateQueue.current.get(senderId) || [];
+                  addDebug(`Processing ${queued.length} queued candidates after answer`);
+                  for (const cand of queued) {
+                    await pc.addIceCandidate(new RTCIceCandidate(cand)).catch(() => {});
+                  }
+                  iceCandidateQueue.current.delete(senderId);
+                } else {
+                  addDebug(`SKIPPED answer - wrong state: ${pc.signalingState}`);
+                }
+              } catch (err) {
+                addDebug(`ANSWER ERROR: ${err}`);
               }
             } else if (sig.type === "candidate") {
               const pc = getOrCreatePeerConnection(senderId);
@@ -588,7 +631,9 @@ export function LiveRoomClient({
             }
           }
         }
-      } catch {}
+      } catch (err) {
+        addDebug(`Signal poll error: ${err}`);
+      }
     }, 1000);
 
     return () => clearInterval(signalInterval);
@@ -787,6 +832,17 @@ export function LiveRoomClient({
             <div className="mb-3 p-3 rounded-2xl bg-amber-950/80 border border-amber-500/40 text-amber-200 text-xs flex items-center gap-2.5 backdrop-blur-md">
               <AlertCircle className="w-4 h-4 text-amber-400 shrink-0" />
               <span>Camera Notice: {streamError} — Allow camera permissions in your browser.</span>
+            </div>
+          )}
+
+          {/* WebRTC Debug Panel - temporary for troubleshooting */}
+          {debugLog.length > 0 && (
+            <div className="mb-2 p-2 rounded-xl bg-blue-950/80 border border-blue-500/30 max-h-32 overflow-y-auto z-40 relative">
+              <div className="text-[9px] font-mono text-blue-300 space-y-0.5">
+                {debugLog.map((log, i) => (
+                  <div key={i}>{log}</div>
+                ))}
+              </div>
             </div>
           )}
 

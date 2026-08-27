@@ -405,15 +405,15 @@ export async function sendLiveSignalAction(
   return { success: true, signalId: signal.id };
 }
 
-export async function getLiveSignalsAction(sessionId: string, sinceDate?: string) {
+export async function getLiveSignalsAction(sessionId: string, afterSignalId?: string | null) {
   const reqHeaders = await headers();
   const session = await auth.api.getSession({ headers: reqHeaders });
 
   if (!session?.user) throw new Error("Unauthorized");
 
   const currentUserId = session.user.id;
-  const filterDate = sinceDate ? new Date(sinceDate) : new Date(Date.now() - 15000);
 
+  // Use cursor-based pagination (by ID) to never miss signals regardless of clock skew
   const signals = await db.liveSignal.findMany({
     where: {
       liveSessionId: sessionId,
@@ -422,10 +422,10 @@ export async function getLiveSignalsAction(sessionId: string, sinceDate?: string
         { receiverId: currentUserId },
         { receiverId: null },
       ],
-      createdAt: { gt: filterDate },
+      ...(afterSignalId ? { id: { gt: afterSignalId } } : { createdAt: { gt: new Date(Date.now() - 30000) } }),
     },
     orderBy: { createdAt: "asc" },
-    take: 40,
+    take: 100,
   });
 
   return {
