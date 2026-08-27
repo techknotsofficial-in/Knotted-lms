@@ -9,6 +9,7 @@ import {
   getLiveSessionStateAction,
   sendLiveSignalAction,
   getLiveSignalsAction,
+  leaveLiveSessionAction,
 } from "@/actions/live";
 import { DRMShield } from "@/components/player/drm-shield";
 import { Logo } from "@/components/ui/logo";
@@ -30,6 +31,9 @@ import {
   LayoutGrid,
   Maximize2,
   Pin,
+  UserPlus,
+  UserMinus,
+  Sparkles,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -108,16 +112,52 @@ function VideoTile({
   className?: string;
 }) {
   const videoRef = useRef<HTMLVideoElement>(null);
+  const [isSpeaking, setIsSpeaking] = useState(false);
 
   useEffect(() => {
     const el = videoRef.current;
     if (el && stream) {
       el.srcObject = stream;
-      el.play().catch(() => {
-        // Handle browser autoplay policy gracefully
-      });
+      el.play().catch(() => {});
     }
   }, [stream]);
+
+  // Audio level analyser for speaking green ring
+  useEffect(() => {
+    if (!stream || !micOn) {
+      setIsSpeaking(false);
+      return;
+    }
+
+    try {
+      const audioContext = new (window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext)();
+      const audioTracks = stream.getAudioTracks();
+      if (audioTracks.length === 0) return;
+
+      const source = audioContext.createMediaStreamSource(stream);
+      const analyser = audioContext.createAnalyser();
+      analyser.fftSize = 256;
+      source.connect(analyser);
+
+      const bufferLength = analyser.frequencyBinCount;
+      const dataArray = new Uint8Array(bufferLength);
+
+      const interval = setInterval(() => {
+        analyser.getByteFrequencyData(dataArray);
+        let sum = 0;
+        for (let i = 0; i < bufferLength; i++) {
+          sum += dataArray[i];
+        }
+        const average = sum / bufferLength;
+        setIsSpeaking(average > 18);
+      }, 200);
+
+      return () => {
+        clearInterval(interval);
+        audioContext.close().catch(() => {});
+      };
+    } catch {}
+  }, [stream, micOn]);
 
   const hasVideoTrack =
     stream &&
@@ -129,7 +169,8 @@ function VideoTile({
   return (
     <div
       className={cn(
-        "relative rounded-2xl bg-[#121215] border border-white/10 overflow-hidden flex items-center justify-center group shadow-lg transition-all duration-200",
+        "relative rounded-2xl bg-[#121215] overflow-hidden flex items-center justify-center group shadow-lg transition-all duration-300",
+        isSpeaking ? "border-2 border-emerald-400 shadow-[0_0_20px_rgba(52,211,153,0.3)]" : "border border-white/10",
         className
       )}
     >
@@ -184,7 +225,7 @@ function VideoTile({
         </div>
       )}
 
-      {/* Bottom Info Bar: Name & Mic Status */}
+      {/* Bottom Info Bar */}
       <div className="absolute bottom-2 left-2 right-2 flex items-center justify-between pointer-events-none z-10">
         <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-black/70 backdrop-blur-md border border-white/10 max-w-[85%]">
           <span className="text-[11px] font-bold text-white truncate">
@@ -235,6 +276,9 @@ export function LiveRoomClient({
   const [spotlightUserId, setSpotlightUserId] = useState<string | null>(null);
   const [activeSideTab, setActiveSideTab] = useState<"chat" | "attendees">("chat");
 
+  // Realtime Notifications (Joined / Exited)
+  const [roomNotification, setRoomNotification] = useState<string | null>(null);
+
   // WebRTC Remote Peer Streams & States
   const peerConnections = useRef<Map<string, RTCPeerConnection>>(new Map());
   const [remoteStreams, setRemoteStreams] = useState<Map<string, MediaStream>>(new Map());
@@ -251,6 +295,12 @@ export function LiveRoomClient({
 
   const chatBottomRef = useRef<HTMLDivElement>(null);
   const lastSignalTimeRef = useRef<string>(new Date(Date.now() - 15000).toISOString());
+
+  // Show temporary toast notification
+  const triggerNotification = (text: string) => {
+    setRoomNotification(text);
+    setTimeout(() => setRoomNotification(null), 4000);
+  };
 
   // Auto-scroll chat
   useEffect(() => {
@@ -327,7 +377,7 @@ export function LiveRoomClient({
         await pc.setLocalDescription(offer);
         await sendLiveSignalAction(session.id, peerId, "offer", JSON.stringify(offer));
       } catch (err) {
-        console.warn("Failed to create/send offer:", err);
+        console.warn("Failed to send offer:", err);
       }
     },
     [getOrCreatePeerConnection, session.id]
@@ -354,7 +404,6 @@ export function LiveRoomClient({
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : "Camera access denied.";
       setStreamError(msg);
-      // Create audio-only fallback if video denied
       try {
         const audioOnly = await navigator.mediaDevices.getUserMedia({ audio: true });
         localStreamRef.current = audioOnly;
@@ -368,7 +417,14 @@ export function LiveRoomClient({
   useEffect(() => {
     initMedia();
 
+    const handleBeforeUnload = () => {
+      leaveLiveSessionAction(session.id);
+    };
+    window.addEventListener("beforeunload", handleBeforeUnload);
+
     return () => {
+      window.removeEventListener("beforeunload", handleBeforeUnload);
+      leaveLiveSessionAction(session.id);
       if (localStreamRef.current) {
         localStreamRef.current.getTracks().forEach((t) => t.stop());
       }
@@ -378,9 +434,9 @@ export function LiveRoomClient({
       peerConnections.current.forEach((pc) => pc.close());
       peerConnections.current.clear();
     };
-  }, [initMedia]);
+  }, [initMedia, session.id]);
 
-  // 2. WebRTC Fast Signaling Polling (Every 1s)
+  // 2. Realtime WebRTC Fast Signaling Polling (Every 1s)
   useEffect(() => {
     const signalInterval = setInterval(async () => {
       try {
@@ -392,6 +448,8 @@ export function LiveRoomClient({
             const senderId = sig.senderId;
 
             if (sig.type === "join") {
+              const info = JSON.parse(sig.payload || "{}");
+              triggerNotification(`👋 ${info.name || "A participant"} joined`);
               await sendOffer(senderId);
               sendLiveSignalAction(
                 session.id,
@@ -399,6 +457,20 @@ export function LiveRoomClient({
                 "status",
                 JSON.stringify({ micOn, cameraOn, handRaised })
               ).catch(() => {});
+            } else if (sig.type === "leave") {
+              const info = JSON.parse(sig.payload || "{}");
+              triggerNotification(`🚪 ${info.name || "A participant"} left`);
+              // Clean up remote peer stream and connection immediately
+              if (peerConnections.current.has(senderId)) {
+                peerConnections.current.get(senderId)?.close();
+                peerConnections.current.delete(senderId);
+              }
+              setRemoteStreams((prev) => {
+                const next = new Map(prev);
+                next.delete(senderId);
+                return next;
+              });
+              setAttendees((prev) => prev.filter((a) => a.id !== senderId));
             } else if (sig.type === "offer") {
               const pc = getOrCreatePeerConnection(senderId);
               const offerData = JSON.parse(sig.payload);
@@ -428,7 +500,7 @@ export function LiveRoomClient({
     return () => clearInterval(signalInterval);
   }, [session.id, sendOffer, getOrCreatePeerConnection, micOn, cameraOn, handRaised]);
 
-  // 3. Database State Polling (Attendees & Messages every 3s)
+  // 3. Database State Polling (Every 3s)
   useEffect(() => {
     const interval = setInterval(async () => {
       try {
@@ -553,6 +625,7 @@ export function LiveRoomClient({
         router.push("/creator/live");
       }
     } else {
+      await leaveLiveSessionAction(session.id);
       router.push(`/live`);
     }
   }
@@ -565,6 +638,14 @@ export function LiveRoomClient({
 
   return (
     <div className="min-h-screen flex flex-col bg-[#09090B] text-white select-none overflow-hidden font-sans">
+      {/* Live Toast Joining/Exiting Banner */}
+      {roomNotification && (
+        <div className="fixed top-20 left-1/2 -translate-x-1/2 z-50 px-4 py-2 rounded-2xl bg-black/80 border border-white/20 text-white text-xs font-bold backdrop-blur-xl shadow-2xl animate-fade-in flex items-center gap-2">
+          <Sparkles className="w-3.5 h-3.5 text-emerald-400" />
+          <span>{roomNotification}</span>
+        </div>
+      )}
+
       {/* Top Live Stage Header */}
       <header className="h-16 border-b border-[#27272A] bg-[#09090B]/90 backdrop-blur-md px-6 flex items-center justify-between z-40">
         <div className="flex items-center gap-4">

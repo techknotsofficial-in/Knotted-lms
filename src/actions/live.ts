@@ -439,3 +439,33 @@ export async function getLiveSignalsAction(sessionId: string, sinceDate?: string
     })),
   };
 }
+
+export async function leaveLiveSessionAction(sessionId: string) {
+  const reqHeaders = await headers();
+  const session = await auth.api.getSession({ headers: reqHeaders });
+
+  if (!session?.user) return { success: false };
+
+  try {
+    // 1. Send leave signal to all active peers
+    await db.liveSignal.create({
+      data: {
+        liveSessionId: sessionId,
+        senderId: session.user.id,
+        receiverId: null,
+        type: "leave",
+        payload: JSON.stringify({ name: session.user.name || session.user.email }),
+      },
+    });
+
+    // 2. Remove attendee record
+    await db.liveAttendee.deleteMany({
+      where: {
+        liveSessionId: sessionId,
+        userId: session.user.id,
+      },
+    });
+  } catch {}
+
+  return { success: true };
+}
