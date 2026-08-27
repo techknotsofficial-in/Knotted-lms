@@ -501,21 +501,30 @@ export function LiveRoomClient({
 
       const pc = new RTCPeerConnection(ICE_SERVERS);
 
+      // Pre-add sendrecv transceivers for both audio and video so SDP always has active media channels
+      try {
+        pc.addTransceiver("audio", { direction: "sendrecv" });
+        pc.addTransceiver("video", { direction: "sendrecv" });
+      } catch {}
+
       const stream = screenStreamRef.current || localStreamRef.current;
       if (stream) {
         stream.getTracks().forEach((track) => {
-          try { pc.addTrack(track, stream); } catch {}
+          const senders = pc.getSenders();
+          const sender = senders.find((s) => s.track?.kind === track.kind);
+          if (sender) {
+            sender.replaceTrack(track).catch(() => {});
+          } else {
+            try { pc.addTrack(track, stream); } catch {}
+          }
         });
       }
 
       pc.ontrack = (event) => {
+        const rStream = event.streams && event.streams[0] ? event.streams[0] : new MediaStream([event.track]);
         setRemoteStreams((prev) => {
           const next = new Map(prev);
-          const allReceivers = pc.getReceivers();
-          const allTracks = allReceivers.map((r) => r.track).filter(Boolean);
-          if (allTracks.length > 0) {
-            next.set(peerId, new MediaStream(allTracks));
-          }
+          next.set(peerId, rStream);
           return next;
         });
       };
@@ -536,7 +545,7 @@ export function LiveRoomClient({
           pc.close();
           peerConnections.current.delete(peerId);
           if (user.id < peerId) {
-            setTimeout(() => sendOffer(peerId), 1500);
+            setTimeout(() => sendOffer(peerId), 1000);
           }
         } else if (state === "disconnected" || state === "closed") {
           setRemoteStreams((prev) => {
@@ -581,7 +590,10 @@ export function LiveRoomClient({
         if (stream) {
           stream.getTracks().forEach((track) => {
             const senders = pc.getSenders();
-            if (!senders.some((s) => s.track?.kind === track.kind)) {
+            const sender = senders.find((s) => s.track?.kind === track.kind);
+            if (sender) {
+              sender.replaceTrack(track).catch(() => {});
+            } else {
               try { pc.addTrack(track, stream); } catch {}
             }
           });
@@ -852,15 +864,34 @@ export function LiveRoomClient({
     } catch {} finally { setIsSending(false); }
   }
 
+  // ─── Auto-Negotiation Loop: ensures peers negotiate once media is ready ───
+  useEffect(() => {
+    if (!localStream) return;
+    const interval = setInterval(() => {
+      otherAttendees.forEach((att) => {
+        const existingStream = remoteStreams.get(att.id);
+        const pc = peerConnections.current.get(att.id);
+        if ((!existingStream || !pc || pc.connectionState === "disconnected" || pc.connectionState === "failed") && user.id < att.id) {
+          sendOffer(att.id);
+        }
+      });
+    }, 3000);
+    return () => clearInterval(interval);
+  }, [localStream, otherAttendees, remoteStreams, sendOffer, user.id]);
+
   async function handleLeaveRoom() {
     if (isInstructor) {
-      if (confirm("End this live session for all participants?")) {
-        await endLiveSessionAction(session.id);
-        router.push("/creator/live");
+      if (window.confirm("End this live session for all participants?")) {
+        try {
+          await endLiveSessionAction(session.id);
+        } catch {}
+        window.location.href = "/creator/live";
       }
     } else {
-      await leaveLiveSessionAction(session.id);
-      router.push("/live");
+      try {
+        await leaveLiveSessionAction(session.id);
+      } catch {}
+      window.location.href = "/live";
     }
   }
 
