@@ -864,6 +864,18 @@ export function LiveRoomClient({
     } catch {} finally { setIsSending(false); }
   }
 
+  // ═══════════════════════════════════════════════════════════
+  // Derived State
+  // ═══════════════════════════════════════════════════════════
+
+  const otherAttendees = attendees.filter((a) => a.id !== user.id);
+  const totalParticipants = 1 + otherAttendees.length;
+  const filteredPeople = peopleSearch
+    ? otherAttendees.filter((a) => a.name.toLowerCase().includes(peopleSearch.toLowerCase()) || a.email.toLowerCase().includes(peopleSearch.toLowerCase()))
+    : otherAttendees;
+  const spotlightAttendee = otherAttendees.find((a) => a.id === spotlightUserId);
+  const isLocalSpotlight = !spotlightUserId || spotlightUserId === user.id;
+
   // ─── Auto-Negotiation Loop: ensures peers negotiate once media is ready ───
   useEffect(() => {
     if (!localStream) return;
@@ -900,18 +912,6 @@ export function LiveRoomClient({
     navigator.clipboard?.writeText(url);
     triggerNotification("📋 Meeting link copied!");
   }
-
-  // ═══════════════════════════════════════════════════════════
-  // Derived State
-  // ═══════════════════════════════════════════════════════════
-
-  const otherAttendees = attendees.filter((a) => a.id !== user.id);
-  const totalParticipants = 1 + otherAttendees.length;
-  const filteredPeople = peopleSearch
-    ? otherAttendees.filter((a) => a.name.toLowerCase().includes(peopleSearch.toLowerCase()) || a.email.toLowerCase().includes(peopleSearch.toLowerCase()))
-    : otherAttendees;
-  const spotlightAttendee = otherAttendees.find((a) => a.id === spotlightUserId);
-  const isLocalSpotlight = !spotlightUserId || spotlightUserId === user.id;
 
   // ═══════════════════════════════════════════════════════════
   // RENDER — Teams-Style 3-Column Layout
