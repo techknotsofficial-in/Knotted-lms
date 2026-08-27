@@ -494,8 +494,13 @@ export function LiveRoomClient({
     }
   }, [session.id, user.name, user.email]);
 
+  const joinSentRef = useRef(false);
+
   useEffect(() => {
-    initMedia();
+    if (!joinSentRef.current) {
+      joinSentRef.current = true;
+      initMedia();
+    }
 
     const handleBeforeUnload = () => {
       leaveLiveSessionAction(session.id);
@@ -525,7 +530,30 @@ export function LiveRoomClient({
           lastSignalIdRef.current = signals[signals.length - 1].id;
           addDebug(`Got ${signals.length} signals: ${signals.map((s) => s.type).join(',')}`);
 
-          for (const sig of signals) {
+          // DEDUPLICATE: For each sender, keep only the LAST offer in the batch
+          // This prevents a second offer from resetting a connection established by the first
+          const lastOfferIndex = new Map<string, number>();
+          signals.forEach((sig, idx) => {
+            if (sig.type === "offer") {
+              lastOfferIndex.set(sig.senderId, idx);
+            }
+          });
+          const skipOfferIndices = new Set<number>();
+          signals.forEach((sig, idx) => {
+            if (sig.type === "offer") {
+              const lastIdx = lastOfferIndex.get(sig.senderId);
+              if (lastIdx !== undefined && idx < lastIdx) {
+                skipOfferIndices.add(idx);
+              }
+            }
+          });
+          if (skipOfferIndices.size > 0) {
+            addDebug(`Skipping ${skipOfferIndices.size} duplicate offer(s)`);
+          }
+
+          for (let sigIdx = 0; sigIdx < signals.length; sigIdx++) {
+            const sig = signals[sigIdx];
+            if (skipOfferIndices.has(sigIdx)) continue; // Skip duplicate offers
             const senderId = sig.senderId;
 
             if (sig.type === "join") {
@@ -558,7 +586,22 @@ export function LiveRoomClient({
               });
               setAttendees((prev) => prev.filter((a) => a.id !== senderId));
             } else if (sig.type === "offer") {
-              addDebug(`Received OFFER from ${senderId.slice(0, 8)} sigState=${getOrCreatePeerConnection(senderId).signalingState}`);
+              const existingPc = peerConnections.current.get(senderId);
+              const existingState = existingPc?.connectionState;
+              addDebug(`Received OFFER from ${senderId.slice(0, 8)} existingState=${existingState || 'none'}`);
+
+              // Skip if we already have a working connection
+              if (existingPc && (existingState === "connected" || existingState === "connecting")) {
+                addDebug(`SKIP offer - already ${existingState} to ${senderId.slice(0, 8)}`);
+                continue;
+              }
+
+              // If existing PC is in a bad state, close it first
+              if (existingPc && existingState !== "new") {
+                existingPc.close();
+                peerConnections.current.delete(senderId);
+              }
+
               try {
                 const pc = getOrCreatePeerConnection(senderId);
                 const offerData = JSON.parse(sig.payload);
