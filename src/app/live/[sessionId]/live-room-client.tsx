@@ -31,9 +31,8 @@ import {
   LayoutGrid,
   Maximize2,
   Pin,
-  UserPlus,
-  UserMinus,
   Sparkles,
+  RefreshCw,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -77,6 +76,7 @@ interface LiveRoomClientProps {
   isInstructor: boolean;
 }
 
+// Enterprise-grade STUN + Open TURN relays (Bypasses Carrier-Grade Mobile NAT & firewalls)
 const ICE_SERVERS: RTCConfiguration = {
   iceServers: [
     { urls: "stun:stun.l.google.com:19302" },
@@ -84,7 +84,23 @@ const ICE_SERVERS: RTCConfiguration = {
     { urls: "stun:stun2.l.google.com:19302" },
     { urls: "stun:stun3.l.google.com:19302" },
     { urls: "stun:stun4.l.google.com:19302" },
+    {
+      urls: "turn:openrelay.metered.ca:80",
+      username: "openrelayproject",
+      credential: "openrelayproject",
+    },
+    {
+      urls: "turn:openrelay.metered.ca:443",
+      username: "openrelayproject",
+      credential: "openrelayproject",
+    },
+    {
+      urls: "turn:openrelay.metered.ca:443?transport=tcp",
+      username: "openrelayproject",
+      credential: "openrelayproject",
+    },
   ],
+  iceCandidatePoolSize: 10,
 };
 
 // Sub-component for individual participant video box
@@ -130,7 +146,10 @@ function VideoTile({
     }
 
     try {
-      const audioContext = new (window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext)();
+      const AudioCtx = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+      if (!AudioCtx) return;
+
+      const audioContext = new AudioCtx();
       const audioTracks = stream.getAudioTracks();
       if (audioTracks.length === 0) return;
 
@@ -276,11 +295,12 @@ export function LiveRoomClient({
   const [spotlightUserId, setSpotlightUserId] = useState<string | null>(null);
   const [activeSideTab, setActiveSideTab] = useState<"chat" | "attendees">("chat");
 
-  // Realtime Notifications (Joined / Exited)
+  // Notifications
   const [roomNotification, setRoomNotification] = useState<string | null>(null);
 
-  // WebRTC Remote Peer Streams & States
+  // WebRTC Remote Peer Connections, Streams & ICE Queues
   const peerConnections = useRef<Map<string, RTCPeerConnection>>(new Map());
+  const iceCandidateQueue = useRef<Map<string, RTCIceCandidateInit[]>>(new Map());
   const [remoteStreams, setRemoteStreams] = useState<Map<string, MediaStream>>(new Map());
   const [peerStatuses, setPeerStatuses] = useState<
     Map<string, { micOn: boolean; cameraOn: boolean; handRaised: boolean }>
@@ -296,13 +316,11 @@ export function LiveRoomClient({
   const chatBottomRef = useRef<HTMLDivElement>(null);
   const lastSignalTimeRef = useRef<string>(new Date(Date.now() - 15000).toISOString());
 
-  // Show temporary toast notification
   const triggerNotification = (text: string) => {
     setRoomNotification(text);
     setTimeout(() => setRoomNotification(null), 4000);
   };
 
-  // Auto-scroll chat
   useEffect(() => {
     chatBottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
@@ -391,10 +409,19 @@ export function LiveRoomClient({
         throw new Error("Camera/Mic not supported by this browser.");
       }
 
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: "user" },
-        audio: true,
-      });
+      // Flexible mobile-friendly constraints
+      let stream: MediaStream;
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: "user" },
+          audio: true,
+        });
+      } catch {
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: true,
+          audio: true,
+        });
+      }
 
       localStreamRef.current = stream;
       setLocalStream(stream);
@@ -436,7 +463,7 @@ export function LiveRoomClient({
     };
   }, [initMedia, session.id]);
 
-  // 2. Realtime WebRTC Fast Signaling Polling (Every 1s)
+  // 2. Realtime WebRTC Fast Signaling Polling (Every 1s with Candidate Queueing)
   useEffect(() => {
     const signalInterval = setInterval(async () => {
       try {
@@ -460,7 +487,6 @@ export function LiveRoomClient({
             } else if (sig.type === "leave") {
               const info = JSON.parse(sig.payload || "{}");
               triggerNotification(`🚪 ${info.name || "A participant"} left`);
-              // Clean up remote peer stream and connection immediately
               if (peerConnections.current.has(senderId)) {
                 peerConnections.current.get(senderId)?.close();
                 peerConnections.current.delete(senderId);
@@ -475,6 +501,14 @@ export function LiveRoomClient({
               const pc = getOrCreatePeerConnection(senderId);
               const offerData = JSON.parse(sig.payload);
               await pc.setRemoteDescription(new RTCSessionDescription(offerData));
+
+              // Process queued candidates
+              const queued = iceCandidateQueue.current.get(senderId) || [];
+              for (const cand of queued) {
+                await pc.addIceCandidate(new RTCIceCandidate(cand)).catch(() => {});
+              }
+              iceCandidateQueue.current.delete(senderId);
+
               const answer = await pc.createAnswer();
               await pc.setLocalDescription(answer);
               await sendLiveSignalAction(session.id, senderId, "answer", JSON.stringify(answer));
@@ -483,11 +517,22 @@ export function LiveRoomClient({
               const answerData = JSON.parse(sig.payload);
               if (pc.signalingState !== "stable") {
                 await pc.setRemoteDescription(new RTCSessionDescription(answerData));
+                const queued = iceCandidateQueue.current.get(senderId) || [];
+                for (const cand of queued) {
+                  await pc.addIceCandidate(new RTCIceCandidate(cand)).catch(() => {});
+                }
+                iceCandidateQueue.current.delete(senderId);
               }
             } else if (sig.type === "candidate") {
               const pc = getOrCreatePeerConnection(senderId);
               const candidateData = JSON.parse(sig.payload);
-              await pc.addIceCandidate(new RTCIceCandidate(candidateData)).catch(() => {});
+              if (pc.remoteDescription && pc.remoteDescription.type) {
+                await pc.addIceCandidate(new RTCIceCandidate(candidateData)).catch(() => {});
+              } else {
+                const queued = iceCandidateQueue.current.get(senderId) || [];
+                queued.push(candidateData);
+                iceCandidateQueue.current.set(senderId, queued);
+              }
             } else if (sig.type === "status") {
               const status = JSON.parse(sig.payload);
               setPeerStatuses((prev) => new Map(prev).set(senderId, status));
@@ -513,6 +558,19 @@ export function LiveRoomClient({
 
     return () => clearInterval(interval);
   }, [session.id]);
+
+  // Periodic Re-sync: if an attendee is present but stream not connected yet, ping offer
+  useEffect(() => {
+    const pingInterval = setInterval(() => {
+      otherAttendees.forEach((att) => {
+        if (!remoteStreams.has(att.id)) {
+          sendOffer(att.id);
+        }
+      });
+    }, 4000);
+
+    return () => clearInterval(pingInterval);
+  }, [attendees, remoteStreams, sendOffer]);
 
   // Controls: Mic Toggle
   function toggleMicrophone() {
