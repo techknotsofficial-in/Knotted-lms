@@ -125,43 +125,7 @@ function VideoTile({
   onPin?: () => void;
   className?: string;
 }) {
-  const videoRef = useRef<HTMLVideoElement>(null);
   const [isSpeaking, setIsSpeaking] = useState(false);
-  const [hasLiveVideo, setHasLiveVideo] = useState(false);
-
-  // Track detection & video binding
-  useEffect(() => {
-    const el = videoRef.current;
-    if (!el || !stream) {
-      setHasLiveVideo(false);
-      return;
-    }
-
-    el.srcObject = stream;
-    el.play().catch(() => {});
-
-    const checkTracks = () => {
-      const videoTracks = stream.getVideoTracks();
-      const isLive = videoTracks.length > 0 && videoTracks.some((t) => t.enabled);
-      setHasLiveVideo(isLive);
-      if (el.srcObject !== stream) {
-        el.srcObject = stream;
-      }
-      el.play().catch(() => {});
-    };
-
-    checkTracks();
-
-    stream.addEventListener("addtrack", checkTracks);
-    stream.addEventListener("removetrack", checkTracks);
-    const interval = setInterval(checkTracks, 400);
-
-    return () => {
-      stream.removeEventListener("addtrack", checkTracks);
-      stream.removeEventListener("removetrack", checkTracks);
-      clearInterval(interval);
-    };
-  }, [stream]);
 
   // Audio level analyser for speaking green ring
   useEffect(() => {
@@ -203,30 +167,32 @@ function VideoTile({
     } catch {}
   }, [stream, micOn]);
 
-  const showLiveVideo = isLocal ? (cameraOn && !!stream) : (cameraOn && hasLiveVideo && !!stream);
-
   return (
     <div
       className={cn(
-        "relative rounded-2xl bg-[#121215] overflow-hidden flex items-center justify-center group shadow-lg transition-all duration-300",
+        "relative rounded-2xl bg-[#09090B] overflow-hidden flex items-center justify-center group shadow-lg transition-all duration-300",
         isSpeaking ? "border-2 border-emerald-400 shadow-[0_0_20px_rgba(52,211,153,0.3)]" : "border border-white/10",
         className
       )}
     >
-      {/* Real Video Element */}
-      <video
-        ref={videoRef}
-        autoPlay
-        playsInline
-        muted={isLocal}
-        className={cn(
-          "w-full h-full object-cover",
-          showLiveVideo ? "opacity-100" : "opacity-0 absolute pointer-events-none"
-        )}
-      />
-
-      {/* Fallback Display */}
-      {!showLiveVideo && (
+      {/* Real-time Video Stream with Direct Ref Callback */}
+      {cameraOn && stream ? (
+        <video
+          ref={(el) => {
+            if (el) {
+              if (el.srcObject !== stream) {
+                el.srcObject = stream;
+              }
+              el.play().catch(() => {});
+            }
+          }}
+          autoPlay
+          playsInline
+          muted={isLocal}
+          className="w-full h-full object-contain bg-[#09090B]"
+        />
+      ) : (
+        /* Fallback Display */
         <div className="flex flex-col items-center justify-center p-4 space-y-3">
           <div className="w-16 h-16 sm:w-20 sm:h-20 rounded-full bg-[#27272A] border-2 border-white/20 flex items-center justify-center text-xl sm:text-2xl font-black text-white shadow-xl">
             {name.charAt(0).toUpperCase()}
@@ -242,6 +208,20 @@ function VideoTile({
             )}
           </div>
         </div>
+      )}
+
+      {/* Dedicated Audio Pipeline for Remote Attendees */}
+      {!isLocal && stream && (
+        <audio
+          ref={(el) => {
+            if (el && el.srcObject !== stream) {
+              el.srcObject = stream;
+              el.play().catch(() => {});
+            }
+          }}
+          autoPlay
+          playsInline
+        />
       )}
 
       {/* Pin / Spotlight button */}
@@ -374,7 +354,6 @@ export function LiveRoomClient({
             if (!existing.getTracks().some((t) => t.id === event.track.id)) {
               existing.addTrack(event.track);
             }
-            // Create a fresh stream wrapper so React updates immediately
             next.set(peerId, new MediaStream(existing.getTracks()));
           } else {
             next.set(peerId, rStream);
