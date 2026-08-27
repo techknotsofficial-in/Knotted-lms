@@ -102,20 +102,13 @@ const ICE_SERVERS: RTCConfiguration = {
     { urls: "stun:stun.l.google.com:19302" },
     { urls: "stun:stun1.l.google.com:19302" },
     { urls: "stun:stun2.l.google.com:19302" },
-    { urls: "stun:stun3.l.google.com:19302" },
-    { urls: "stun:stun4.l.google.com:19302" },
+    { urls: "stun:stun.cloudflare.com:3478" },
     {
-      urls: "turn:openrelay.metered.ca:80",
-      username: "openrelayproject",
-      credential: "openrelayproject",
-    },
-    {
-      urls: "turn:openrelay.metered.ca:443",
-      username: "openrelayproject",
-      credential: "openrelayproject",
-    },
-    {
-      urls: "turn:openrelay.metered.ca:443?transport=tcp",
+      urls: [
+        "turn:openrelay.metered.ca:80",
+        "turn:openrelay.metered.ca:443",
+        "turn:openrelay.metered.ca:443?transport=tcp",
+      ],
       username: "openrelayproject",
       credential: "openrelayproject",
     },
@@ -561,7 +554,7 @@ export function LiveRoomClient({
     [session.id, user.id]
   );
 
-  // Vanilla ICE helper: wait for ICE gathering to finish, then return the complete SDP
+  // Vanilla ICE helper: wait for ICE gathering to finish or up to 1200ms
   const waitForIceGathering = (pc: RTCPeerConnection): Promise<RTCSessionDescription | null> => {
     return new Promise((resolve) => {
       if (pc.iceGatheringState === "complete") {
@@ -569,9 +562,8 @@ export function LiveRoomClient({
         return;
       }
       const timeout = setTimeout(() => {
-        // After 5s, send what we have (some candidates are better than none)
         resolve(pc.localDescription);
-      }, 5000);
+      }, 1200);
       pc.onicegatheringstatechange = () => {
         if (pc.iceGatheringState === "complete") {
           clearTimeout(timeout);
