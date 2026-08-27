@@ -250,6 +250,30 @@ function VideoTile({
 
   const avatarSize = size === "small" ? "w-10 h-10 text-sm" : size === "large" ? "w-20 h-20 text-3xl" : "w-14 h-14 text-xl";
 
+  const [hasActiveVideo, setHasActiveVideo] = useState(false);
+
+  useEffect(() => {
+    if (!stream) {
+      setHasActiveVideo(false);
+      return;
+    }
+    const checkTracks = () => {
+      const vTracks = stream.getVideoTracks();
+      setHasActiveVideo(vTracks.length > 0 && vTracks.some((t) => t.enabled));
+    };
+    checkTracks();
+    stream.addEventListener("addtrack", checkTracks);
+    stream.addEventListener("removetrack", checkTracks);
+    const interval = setInterval(checkTracks, 500);
+    return () => {
+      stream.removeEventListener("addtrack", checkTracks);
+      stream.removeEventListener("removetrack", checkTracks);
+      clearInterval(interval);
+    };
+  }, [stream]);
+
+  const showVideo = isLocal ? (cameraOn && !!stream) : (cameraOn && hasActiveVideo);
+
   return (
     <div
       className={cn(
@@ -262,28 +286,34 @@ function VideoTile({
       )}
     >
       {/* Video Element */}
-      {cameraOn && stream ? (
-        <video
-          ref={(el) => {
-            if (el) {
-              if (el.srcObject !== stream) el.srcObject = stream;
+      <video
+        ref={(el) => {
+          if (el) {
+            if (el.srcObject !== stream) el.srcObject = stream;
+            el.play().catch(() => {
+              el.muted = true;
               el.play().catch(() => {});
-            }
-          }}
-          autoPlay
-          playsInline
-          muted={isLocal}
-          className="w-full h-full object-cover"
-        />
-      ) : (
-        /* Avatar Fallback */
+            });
+          }
+        }}
+        autoPlay
+        playsInline
+        muted={isLocal}
+        className={cn(
+          "w-full h-full object-cover",
+          showVideo ? "opacity-100" : "opacity-0 absolute pointer-events-none"
+        )}
+      />
+
+      {/* Avatar Fallback */}
+      {!showVideo && (
         <div className="flex flex-col items-center justify-center gap-2">
           <div className={cn("rounded-full bg-gradient-to-br flex items-center justify-center font-bold text-white shadow-lg", gradient, avatarSize)}>
             {name.charAt(0).toUpperCase()}
           </div>
           {size !== "small" && (
             <span className="text-[11px] text-white/40 font-medium">
-              {cameraOn ? "Connecting..." : "Camera off"}
+              {cameraOn ? "Connecting live video..." : "Camera off"}
             </span>
           )}
         </div>
@@ -531,6 +561,26 @@ export function LiveRoomClient({
     [session.id, user.id]
   );
 
+  // Vanilla ICE helper: wait for ICE gathering to finish, then return the complete SDP
+  const waitForIceGathering = (pc: RTCPeerConnection): Promise<RTCSessionDescription | null> => {
+    return new Promise((resolve) => {
+      if (pc.iceGatheringState === "complete") {
+        resolve(pc.localDescription);
+        return;
+      }
+      const timeout = setTimeout(() => {
+        // After 5s, send what we have (some candidates are better than none)
+        resolve(pc.localDescription);
+      }, 5000);
+      pc.onicegatheringstatechange = () => {
+        if (pc.iceGatheringState === "complete") {
+          clearTimeout(timeout);
+          resolve(pc.localDescription);
+        }
+      };
+    });
+  };
+
   const sendOffer = useCallback(
     async (peerId: string) => {
       try {
@@ -546,7 +596,12 @@ export function LiveRoomClient({
         }
         const offer = await pc.createOffer({ offerToReceiveAudio: true, offerToReceiveVideo: true });
         await pc.setLocalDescription(offer);
-        await sendLiveSignalAction(session.id, peerId, "offer", JSON.stringify(offer));
+
+        // Wait for ICE gathering to complete so ALL candidates are embedded in the SDP
+        const completeOffer = await waitForIceGathering(pc);
+        if (completeOffer) {
+          await sendLiveSignalAction(session.id, peerId, "offer", JSON.stringify(completeOffer));
+        }
       } catch {}
     },
     [getOrCreatePeerConnection, session.id]
@@ -678,7 +733,10 @@ export function LiveRoomClient({
                 iceCandidateQueue.current.delete(senderId);
                 const answer = await pc.createAnswer();
                 await pc.setLocalDescription(answer);
-                await sendLiveSignalAction(session.id, senderId, "answer", JSON.stringify(answer));
+                const completeAnswer = await waitForIceGathering(pc);
+                if (completeAnswer) {
+                  await sendLiveSignalAction(session.id, senderId, "answer", JSON.stringify(completeAnswer));
+                }
               } catch {}
             } else if (sig.type === "answer") {
               try {
