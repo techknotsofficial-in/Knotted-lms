@@ -127,16 +127,43 @@ function VideoTile({
 }) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const [isSpeaking, setIsSpeaking] = useState(false);
+  const [hasLiveVideo, setHasLiveVideo] = useState(false);
 
+  // Track detection & video binding
   useEffect(() => {
     const el = videoRef.current;
-    if (el && stream) {
-      el.srcObject = stream;
-      el.play().catch(() => {});
+    if (!el || !stream) {
+      setHasLiveVideo(false);
+      return;
     }
+
+    el.srcObject = stream;
+    el.play().catch(() => {});
+
+    const checkTracks = () => {
+      const videoTracks = stream.getVideoTracks();
+      const isLive = videoTracks.length > 0 && videoTracks.some((t) => t.enabled);
+      setHasLiveVideo(isLive);
+      if (el.srcObject !== stream) {
+        el.srcObject = stream;
+      }
+      el.play().catch(() => {});
+    };
+
+    checkTracks();
+
+    stream.addEventListener("addtrack", checkTracks);
+    stream.addEventListener("removetrack", checkTracks);
+    const interval = setInterval(checkTracks, 400);
+
+    return () => {
+      stream.removeEventListener("addtrack", checkTracks);
+      stream.removeEventListener("removetrack", checkTracks);
+      clearInterval(interval);
+    };
   }, [stream]);
 
-  // Audio level analyser for active speaker green ring
+  // Audio level analyser for speaking green ring
   useEffect(() => {
     if (!stream || !micOn) {
       setIsSpeaking(false);
@@ -176,12 +203,7 @@ function VideoTile({
     } catch {}
   }, [stream, micOn]);
 
-  const hasVideoTrack =
-    stream &&
-    stream.getVideoTracks().length > 0 &&
-    stream.getVideoTracks().some((t) => t.enabled && t.readyState === "live");
-
-  const showLiveVideo = (isLocal ? cameraOn : (cameraOn && hasVideoTrack)) && !!stream;
+  const showLiveVideo = isLocal ? (cameraOn && !!stream) : (cameraOn && hasLiveVideo && !!stream);
 
   return (
     <div
@@ -343,6 +365,7 @@ export function LiveRoomClient({
 
       // Handle receiving remote tracks
       pc.ontrack = (event) => {
+        console.log("WebRTC ontrack received:", event.track.kind, "from peer", peerId);
         const rStream = event.streams && event.streams[0] ? event.streams[0] : new MediaStream([event.track]);
         setRemoteStreams((prev) => {
           const next = new Map(prev);
@@ -351,7 +374,8 @@ export function LiveRoomClient({
             if (!existing.getTracks().some((t) => t.id === event.track.id)) {
               existing.addTrack(event.track);
             }
-            next.set(peerId, existing);
+            // Create a fresh stream wrapper so React updates immediately
+            next.set(peerId, new MediaStream(existing.getTracks()));
           } else {
             next.set(peerId, rStream);
           }
@@ -393,7 +417,6 @@ export function LiveRoomClient({
     async (peerId: string) => {
       try {
         const pc = getOrCreatePeerConnection(peerId);
-        // Ensure local tracks are attached before creating offer
         const stream = screenStreamRef.current || localStreamRef.current;
         if (stream) {
           stream.getTracks().forEach((track) => {
@@ -605,19 +628,6 @@ export function LiveRoomClient({
 
     return () => clearInterval(interval);
   }, [session.id]);
-
-  // Auto self-healing ping: re-negotiate if attendee exists but stream is not flowing yet
-  useEffect(() => {
-    const pingInterval = setInterval(() => {
-      otherAttendees.forEach((att) => {
-        if (!remoteStreams.has(att.id) && user.id < att.id) {
-          sendOffer(att.id);
-        }
-      });
-    }, 3500);
-
-    return () => clearInterval(pingInterval);
-  }, [attendees, remoteStreams, sendOffer, user.id]);
 
   // Controls: Mic Toggle
   function toggleMicrophone() {
