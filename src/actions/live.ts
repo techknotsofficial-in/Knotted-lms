@@ -380,3 +380,62 @@ export async function endLiveSessionAction(sessionId: string) {
 
   return { success: true };
 }
+
+export async function sendLiveSignalAction(
+  sessionId: string,
+  receiverId: string | null,
+  type: string,
+  payload: string
+) {
+  const reqHeaders = await headers();
+  const session = await auth.api.getSession({ headers: reqHeaders });
+
+  if (!session?.user) throw new Error("Unauthorized");
+
+  const signal = await db.liveSignal.create({
+    data: {
+      liveSessionId: sessionId,
+      senderId: session.user.id,
+      receiverId: receiverId,
+      type,
+      payload,
+    },
+  });
+
+  return { success: true, signalId: signal.id };
+}
+
+export async function getLiveSignalsAction(sessionId: string, sinceDate?: string) {
+  const reqHeaders = await headers();
+  const session = await auth.api.getSession({ headers: reqHeaders });
+
+  if (!session?.user) throw new Error("Unauthorized");
+
+  const currentUserId = session.user.id;
+  const filterDate = sinceDate ? new Date(sinceDate) : new Date(Date.now() - 15000);
+
+  const signals = await db.liveSignal.findMany({
+    where: {
+      liveSessionId: sessionId,
+      senderId: { not: currentUserId },
+      OR: [
+        { receiverId: currentUserId },
+        { receiverId: null },
+      ],
+      createdAt: { gt: filterDate },
+    },
+    orderBy: { createdAt: "asc" },
+    take: 40,
+  });
+
+  return {
+    signals: signals.map((s) => ({
+      id: s.id,
+      senderId: s.senderId,
+      receiverId: s.receiverId,
+      type: s.type,
+      payload: s.payload,
+      createdAt: s.createdAt.toISOString(),
+    })),
+  };
+}

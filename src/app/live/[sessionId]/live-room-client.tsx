@@ -7,6 +7,8 @@ import {
   endLiveSessionAction,
   sendLiveChatMessageAction,
   getLiveSessionStateAction,
+  sendLiveSignalAction,
+  getLiveSignalsAction,
 } from "@/actions/live";
 import { DRMShield } from "@/components/player/drm-shield";
 import { Logo } from "@/components/ui/logo";
@@ -24,12 +26,13 @@ import {
   Radio,
   PhoneOff,
   Send,
-  Sparkles,
   Monitor,
   AlertCircle,
-  Camera,
-  CheckCircle2,
   Loader2,
+  LayoutGrid,
+  Maximize2,
+  Pin,
+  Sparkles,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -73,6 +76,123 @@ interface LiveRoomClientProps {
   isInstructor: boolean;
 }
 
+const ICE_SERVERS: RTCConfiguration = {
+  iceServers: [
+    { urls: "stun:stun.l.google.com:19302" },
+    { urls: "stun:stun1.l.google.com:19302" },
+    { urls: "stun:stun2.l.google.com:19302" },
+  ],
+};
+
+// Sub-component for individual participant video box
+function VideoTile({
+  stream,
+  name,
+  isLocal,
+  isInstructor,
+  micOn,
+  cameraOn,
+  handRaised,
+  isSpotlight,
+  onPin,
+  className,
+}: {
+  stream: MediaStream | null;
+  name: string;
+  isLocal?: boolean;
+  isInstructor?: boolean;
+  micOn: boolean;
+  cameraOn: boolean;
+  handRaised?: boolean;
+  isSpotlight?: boolean;
+  onPin?: () => void;
+  className?: string;
+}) {
+  const videoRef = useRef<HTMLVideoElement>(null);
+
+  useEffect(() => {
+    if (videoRef.current && stream) {
+      videoRef.current.srcObject = stream;
+    }
+  }, [stream]);
+
+  return (
+    <div
+      className={cn(
+        "relative rounded-2xl bg-[#121215] border border-white/10 overflow-hidden flex items-center justify-center group shadow-lg transition-all duration-200",
+        className
+      )}
+    >
+      {/* Video Element */}
+      <video
+        ref={videoRef}
+        autoPlay
+        playsInline
+        muted={isLocal}
+        className={cn(
+          "w-full h-full object-cover",
+          cameraOn && stream ? "opacity-100" : "opacity-0 absolute"
+        )}
+      />
+
+      {/* Fallback Avatar when camera is turned off */}
+      {(!cameraOn || !stream) && (
+        <div className="flex flex-col items-center justify-center p-4 space-y-3">
+          <div className="w-16 h-16 sm:w-20 sm:h-20 rounded-full bg-[#27272A] border-2 border-white/20 flex items-center justify-center text-xl sm:text-2xl font-black text-white shadow-xl">
+            {name.charAt(0).toUpperCase()}
+          </div>
+          <span className="text-xs text-[#71717A] font-medium">Camera Off</span>
+        </div>
+      )}
+
+      {/* Pin / Spotlight button on hover */}
+      {onPin && (
+        <button
+          type="button"
+          onClick={onPin}
+          className="absolute top-3 right-3 p-1.5 rounded-lg bg-black/60 text-white/80 hover:text-white hover:bg-black/90 backdrop-blur-md opacity-0 group-hover:opacity-100 transition-opacity z-10"
+          title={isSpotlight ? "Unpin Participant" : "Pin Participant"}
+        >
+          <Pin className={cn("w-3.5 h-3.5", isSpotlight && "fill-white text-white")} />
+        </button>
+      )}
+
+      {/* Hand Raised Floating Badge */}
+      {handRaised && (
+        <div className="absolute top-3 left-3 px-2.5 py-1 rounded-full bg-amber-400 text-black text-[11px] font-bold flex items-center gap-1 shadow-lg animate-bounce z-10">
+          <Hand className="w-3 h-3" />
+          <span>Hand Raised</span>
+        </div>
+      )}
+
+      {/* Bottom Info Bar: Name & Mic Status */}
+      <div className="absolute bottom-2 left-2 right-2 flex items-center justify-between pointer-events-none z-10">
+        <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-black/70 backdrop-blur-md border border-white/10 max-w-[85%]">
+          <span className="text-[11px] font-bold text-white truncate">
+            {name} {isLocal && "(You)"}
+          </span>
+          {isInstructor && (
+            <Badge variant="mint" className="text-[9px] px-1 py-0 uppercase font-black">
+              Host
+            </Badge>
+          )}
+        </div>
+
+        <div
+          className={cn(
+            "p-1.5 rounded-lg backdrop-blur-md border",
+            micOn
+              ? "bg-black/70 border-white/10 text-emerald-400"
+              : "bg-red-600/90 border-red-500/30 text-white"
+          )}
+        >
+          {micOn ? <Mic className="w-3 h-3" /> : <MicOff className="w-3 h-3" />}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export function LiveRoomClient({
   session,
   attendees: initialAttendees,
@@ -82,20 +202,28 @@ export function LiveRoomClient({
 }: LiveRoomClientProps) {
   const router = useRouter();
 
-  // Media Stream & Device State
-  const videoRef = useRef<HTMLVideoElement>(null);
-  const mediaStreamRef = useRef<MediaStream | null>(null);
+  // Local Media Streams
+  const localStreamRef = useRef<MediaStream | null>(null);
   const screenStreamRef = useRef<MediaStream | null>(null);
 
-  const [streamActive, setStreamActive] = useState(false);
+  const [localStream, setLocalStream] = useState<MediaStream | null>(null);
   const [streamError, setStreamError] = useState<string | null>(null);
   const [micOn, setMicOn] = useState(true);
   const [cameraOn, setCameraOn] = useState(true);
   const [isScreenSharing, setIsScreenSharing] = useState(false);
   const [handRaised, setHandRaised] = useState(false);
+  const [viewMode, setViewMode] = useState<"grid" | "spotlight">("spotlight");
+  const [spotlightUserId, setSpotlightUserId] = useState<string | null>(null);
   const [activeSideTab, setActiveSideTab] = useState<"chat" | "attendees">("chat");
 
-  // Real Database Attendees & Live Messages State
+  // WebRTC Remote Peer Streams & States
+  const peerConnections = useRef<Map<string, RTCPeerConnection>>(new Map());
+  const [remoteStreams, setRemoteStreams] = useState<Map<string, MediaStream>>(new Map());
+  const [peerStatuses, setPeerStatuses] = useState<
+    Map<string, { micOn: boolean; cameraOn: boolean; handRaised: boolean }>
+  >(new Map());
+
+  // Database Attendance & Chat State
   const [attendees, setAttendees] = useState<AttendeeItem[]>(initialAttendees);
   const [messages, setMessages] = useState<ChatMessage[]>(initialMessages);
   const [isLiveActive, setIsLiveActive] = useState(session.isLive);
@@ -103,119 +231,238 @@ export function LiveRoomClient({
   const [isSending, setIsSending] = useState(false);
 
   const chatBottomRef = useRef<HTMLDivElement>(null);
+  const lastSignalTimeRef = useRef<string>(new Date(Date.now() - 10000).toISOString());
 
-  // Auto-scroll chat to latest message
+  // Auto-scroll chat
   useEffect(() => {
     chatBottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
-  // Real-Time 3-Second Synchronizer for Chat, Attendees & Stream Status
+  // 1. Initialize Local Camera & Microphone
+  const initMedia = useCallback(async () => {
+    try {
+      setStreamError(null);
+      if (!navigator.mediaDevices?.getUserMedia) {
+        throw new Error("Camera/Mic not supported by this browser environment.");
+      }
+
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: "user" },
+        audio: true,
+      });
+
+      localStreamRef.current = stream;
+      setLocalStream(stream);
+
+      // Announce join to peers in the room
+      await sendLiveSignalAction(session.id, null, "join", JSON.stringify({ name: user.name || user.email }));
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "Camera access denied.";
+      setStreamError(msg);
+      // Create audio-only fallback or silent stream if video denied
+      try {
+        const audioOnly = await navigator.mediaDevices.getUserMedia({ audio: true });
+        localStreamRef.current = audioOnly;
+        setLocalStream(audioOnly);
+        setCameraOn(false);
+      } catch {}
+    }
+  }, [session.id, user.name, user.email]);
+
+  useEffect(() => {
+    initMedia();
+
+    return () => {
+      // Cleanup all media tracks and peer connections on exit
+      if (localStreamRef.current) {
+        localStreamRef.current.getTracks().forEach((t) => t.stop());
+      }
+      if (screenStreamRef.current) {
+        screenStreamRef.current.getTracks().forEach((t) => t.stop());
+      }
+      peerConnections.current.forEach((pc) => pc.close());
+      peerConnections.current.clear();
+    };
+  }, [initMedia]);
+
+  // Helper to create and wire up an RTCPeerConnection for a peer
+  const getOrCreatePeerConnection = useCallback(
+    (peerId: string) => {
+      if (peerConnections.current.has(peerId)) {
+        return peerConnections.current.get(peerId)!;
+      }
+
+      const pc = new RTCPeerConnection(ICE_SERVERS);
+
+      // Add local stream tracks
+      const stream = screenStreamRef.current || localStreamRef.current;
+      if (stream) {
+        stream.getTracks().forEach((track) => {
+          pc.addTrack(track, stream);
+        });
+      }
+
+      // Handle receiving remote tracks
+      pc.ontrack = (event) => {
+        if (event.streams && event.streams[0]) {
+          const remoteStream = event.streams[0];
+          setRemoteStreams((prev) => new Map(prev).set(peerId, remoteStream));
+        }
+      };
+
+      // Handle ICE Candidates
+      pc.onicecandidate = (event) => {
+        if (event.candidate) {
+          sendLiveSignalAction(
+            session.id,
+            peerId,
+            "candidate",
+            JSON.stringify(event.candidate)
+          ).catch(() => {});
+        }
+      };
+
+      pc.onconnectionstatechange = () => {
+        if (pc.connectionState === "disconnected" || pc.connectionState === "failed" || pc.connectionState === "closed") {
+          setRemoteStreams((prev) => {
+            const next = new Map(prev);
+            next.delete(peerId);
+            return next;
+          });
+          peerConnections.current.delete(peerId);
+        }
+      };
+
+      peerConnections.current.set(peerId, pc);
+      return pc;
+    },
+    [session.id]
+  );
+
+  // Send an Offer to a specific peer
+  const sendOffer = useCallback(
+    async (peerId: string) => {
+      try {
+        const pc = getOrCreatePeerConnection(peerId);
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+        await sendLiveSignalAction(session.id, peerId, "offer", JSON.stringify(offer));
+      } catch (err) {
+        console.warn("Failed to create/send offer:", err);
+      }
+    },
+    [getOrCreatePeerConnection, session.id]
+  );
+
+  // 2. WebRTC Signaling Loop (Every 2s polling)
+  useEffect(() => {
+    const signalInterval = setInterval(async () => {
+      try {
+        const { signals } = await getLiveSignalsAction(session.id, lastSignalTimeRef.current);
+        if (signals.length > 0) {
+          lastSignalTimeRef.current = signals[signals.length - 1].createdAt;
+
+          for (const sig of signals) {
+            const senderId = sig.senderId;
+
+            if (sig.type === "join") {
+              // A new peer joined, initiate offer to them
+              await sendOffer(senderId);
+              // Broadcast current media state
+              sendLiveSignalAction(
+                session.id,
+                senderId,
+                "status",
+                JSON.stringify({ micOn, cameraOn, handRaised })
+              ).catch(() => {});
+            } else if (sig.type === "offer") {
+              const pc = getOrCreatePeerConnection(senderId);
+              const offerData = JSON.parse(sig.payload);
+              await pc.setRemoteDescription(new RTCSessionDescription(offerData));
+              const answer = await pc.createAnswer();
+              await pc.setLocalDescription(answer);
+              await sendLiveSignalAction(session.id, senderId, "answer", JSON.stringify(answer));
+            } else if (sig.type === "answer") {
+              const pc = getOrCreatePeerConnection(senderId);
+              const answerData = JSON.parse(sig.payload);
+              await pc.setRemoteDescription(new RTCSessionDescription(answerData));
+            } else if (sig.type === "candidate") {
+              const pc = getOrCreatePeerConnection(senderId);
+              const candidateData = JSON.parse(sig.payload);
+              await pc.addIceCandidate(new RTCIceCandidate(candidateData)).catch(() => {});
+            } else if (sig.type === "status") {
+              const status = JSON.parse(sig.payload);
+              setPeerStatuses((prev) => new Map(prev).set(senderId, status));
+            }
+          }
+        }
+      } catch {}
+    }, 2000);
+
+    return () => clearInterval(signalInterval);
+  }, [session.id, sendOffer, getOrCreatePeerConnection, micOn, cameraOn, handRaised]);
+
+  // 3. Database State Polling (Attendees, Chat & Live Status every 3s)
   useEffect(() => {
     const interval = setInterval(async () => {
       try {
         const state = await getLiveSessionStateAction(session.id);
         setIsLiveActive(state.isLive);
-        if (state.attendees.length > 0) {
-          setAttendees(state.attendees);
-        }
-        if (state.messages.length > 0) {
-          setMessages(state.messages);
-        }
-      } catch (err) {
-        // Silent sync catch
-      }
+        if (state.attendees.length > 0) setAttendees(state.attendees);
+        if (state.messages.length > 0) setMessages(state.messages);
+      } catch {}
     }, 3000);
 
     return () => clearInterval(interval);
   }, [session.id]);
 
-  // Start Real Hardware Media Stream (Webcam & Microphone)
-  const initUserMedia = useCallback(async () => {
-    try {
-      setStreamError(null);
-      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-        throw new Error("Camera & Microphone access is not supported by your browser environment.");
-      }
-
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: { width: { ideal: 1920 }, height: { ideal: 1080 }, facingMode: "user" },
-        audio: true,
-      });
-
-      mediaStreamRef.current = stream;
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-        await videoRef.current.play().catch(() => {});
-      }
-      setStreamActive(true);
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : "Could not access camera/microphone";
-      setStreamError(msg);
-      setStreamActive(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    initUserMedia();
-
-    return () => {
-      // Clean up hardware streams on unmount
-      if (mediaStreamRef.current) {
-        mediaStreamRef.current.getTracks().forEach((track) => track.stop());
-      }
-      if (screenStreamRef.current) {
-        screenStreamRef.current.getTracks().forEach((track) => track.stop());
-      }
-    };
-  }, [initUserMedia]);
-
-  // Toggle Microphone Audio Track
+  // Controls: Mic Toggle
   function toggleMicrophone() {
-    if (mediaStreamRef.current) {
-      const audioTracks = mediaStreamRef.current.getAudioTracks();
-      if (audioTracks.length > 0) {
-        const nextState = !micOn;
-        audioTracks.forEach((track) => {
-          track.enabled = nextState;
-        });
-        setMicOn(nextState);
-        return;
-      }
+    const stream = localStreamRef.current;
+    if (stream) {
+      const audioTracks = stream.getAudioTracks();
+      const nextState = !micOn;
+      audioTracks.forEach((t) => (t.enabled = nextState));
+      setMicOn(nextState);
+      sendLiveSignalAction(session.id, null, "status", JSON.stringify({ micOn: nextState, cameraOn, handRaised })).catch(() => {});
     }
-    setMicOn(!micOn);
   }
 
-  // Toggle Webcam Video Track
+  // Controls: Camera Toggle
   function toggleCamera() {
-    if (mediaStreamRef.current) {
-      const videoTracks = mediaStreamRef.current.getVideoTracks();
-      if (videoTracks.length > 0) {
-        const nextState = !cameraOn;
-        videoTracks.forEach((track) => {
-          track.enabled = nextState;
-        });
-        setCameraOn(nextState);
-        return;
-      }
+    const stream = localStreamRef.current;
+    if (stream) {
+      const videoTracks = stream.getVideoTracks();
+      const nextState = !cameraOn;
+      videoTracks.forEach((t) => (t.enabled = nextState));
+      setCameraOn(nextState);
+      sendLiveSignalAction(session.id, null, "status", JSON.stringify({ micOn, cameraOn: nextState, handRaised })).catch(() => {});
     }
-    setCameraOn(!cameraOn);
   }
 
-  // Start Real Browser Screen Sharing via getDisplayMedia
+  // Controls: Screen Share Toggle
   async function toggleScreenShare() {
     if (isScreenSharing) {
       if (screenStreamRef.current) {
-        screenStreamRef.current.getTracks().forEach((track) => track.stop());
+        screenStreamRef.current.getTracks().forEach((t) => t.stop());
         screenStreamRef.current = null;
       }
-      if (videoRef.current && mediaStreamRef.current) {
-        videoRef.current.srcObject = mediaStreamRef.current;
-        await videoRef.current.play().catch(() => {});
+      // Revert tracks to camera
+      if (localStreamRef.current) {
+        peerConnections.current.forEach((pc) => {
+          const senders = pc.getSenders();
+          const videoSender = senders.find((s) => s.track?.kind === "video");
+          const localVideoTrack = localStreamRef.current?.getVideoTracks()[0];
+          if (videoSender && localVideoTrack) {
+            videoSender.replaceTrack(localVideoTrack);
+          }
+        });
       }
+      setLocalStream(localStreamRef.current);
       setIsScreenSharing(false);
     } else {
       try {
-        if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
+        if (!navigator.mediaDevices?.getDisplayMedia) {
           alert("Screen sharing is not supported in this browser.");
           return;
         }
@@ -226,26 +473,34 @@ export function LiveRoomClient({
         });
 
         screenStreamRef.current = screenStream;
+        setLocalStream(screenStream);
 
-        if (videoRef.current) {
-          videoRef.current.srcObject = screenStream;
-          await videoRef.current.play().catch(() => {});
-        }
-
-        screenStream.getVideoTracks()[0].onended = () => {
-          if (videoRef.current && mediaStreamRef.current) {
-            videoRef.current.srcObject = mediaStreamRef.current;
+        const screenTrack = screenStream.getVideoTracks()[0];
+        peerConnections.current.forEach((pc) => {
+          const senders = pc.getSenders();
+          const videoSender = senders.find((s) => s.track?.kind === "video");
+          if (videoSender && screenTrack) {
+            videoSender.replaceTrack(screenTrack);
           }
-          setIsScreenSharing(false);
+        });
+
+        screenTrack.onended = () => {
+          toggleScreenShare();
         };
 
         setIsScreenSharing(true);
-      } catch (err) {
-        console.warn("Screen sharing cancelled or denied:", err);
-      }
+      } catch {}
     }
   }
 
+  // Controls: Raise Hand
+  function toggleHandRaise() {
+    const nextState = !handRaised;
+    setHandRaised(nextState);
+    sendLiveSignalAction(session.id, null, "status", JSON.stringify({ micOn, cameraOn, handRaised: nextState })).catch(() => {});
+  }
+
+  // Controls: Send Chat Message
   async function handleSendMessage(e: React.FormEvent) {
     e.preventDefault();
     if (!inputMessage.trim() || isSending) return;
@@ -259,13 +514,13 @@ export function LiveRoomClient({
       if (res.success && res.message) {
         setMessages((prev) => [...prev, res.message]);
       }
-    } catch (err) {
-      console.error("Failed to send message:", err);
+    } catch {
     } finally {
       setIsSending(false);
     }
   }
 
+  // Controls: Leave / End Call
   async function handleLeaveRoom() {
     if (isInstructor) {
       if (confirm("End this live cohort stream for all attendees?")) {
@@ -277,8 +532,16 @@ export function LiveRoomClient({
     }
   }
 
+  // Build the list of all active participants
+  const otherAttendees = attendees.filter((a) => a.id !== user.id);
+  const totalParticipants = 1 + otherAttendees.length;
+
+  // Active spotlight participant (defaults to local user if none chosen)
+  const spotlightAttendee = otherAttendees.find((a) => a.id === spotlightUserId);
+  const isLocalSpotlight = !spotlightUserId || spotlightUserId === user.id;
+
   return (
-    <div className="min-h-screen flex flex-col bg-[#09090B] text-white select-none">
+    <div className="min-h-screen flex flex-col bg-[#09090B] text-white select-none overflow-hidden font-sans">
       {/* Top Live Stage Header */}
       <header className="h-16 border-b border-[#27272A] bg-[#09090B]/90 backdrop-blur-md px-6 flex items-center justify-between z-40">
         <div className="flex items-center gap-4">
@@ -300,7 +563,7 @@ export function LiveRoomClient({
         <div className="flex items-center gap-3">
           <div className="flex items-center gap-2 px-3 py-1 rounded-full bg-white/10 text-xs font-semibold text-[#A1A1AA] border border-white/10 font-mono">
             <Users className="w-3.5 h-3.5 text-emerald-400" />
-            <span>{Math.max(attendees.length, 1)} Connected</span>
+            <span>{totalParticipants} In Classroom</span>
           </div>
 
           <Button
@@ -308,75 +571,164 @@ export function LiveRoomClient({
             variant="default"
             size="sm"
             onClick={handleLeaveRoom}
-            className="bg-red-600 hover:bg-red-700 text-white font-bold text-xs rounded-xl h-9 px-4"
+            className="bg-red-600 hover:bg-red-700 text-white font-bold text-xs rounded-xl h-9 px-4 shadow-md"
           >
             <PhoneOff className="w-3.5 h-3.5 mr-1" />
-            {isInstructor ? "End Stream" : "Leave Classroom"}
+            {isInstructor ? "End Stream" : "Leave"}
           </Button>
         </div>
       </header>
 
-      {/* Main Classroom Grid: Real Video Stage (9 Cols) + Live Chat Panel (3 Cols) */}
+      {/* Main Classroom Split: Video Stage Area (8/9 cols) + Side Panel (4/3 cols) */}
       <div className="flex-1 grid grid-cols-1 lg:grid-cols-12 overflow-hidden relative">
-        {/* Left 8/9 Columns: Real Media Stream Video Stage */}
-        <div className="lg:col-span-8 xl:col-span-9 flex flex-col justify-between p-4 sm:p-6 relative bg-black/80">
-          {/* Subtle Anti-Piracy Watermark */}
+        {/* Left Columns: Dynamic Video Stage & Multi-Tile Grid */}
+        <div className="lg:col-span-8 xl:col-span-9 flex flex-col justify-between p-4 sm:p-6 bg-black/90 relative overflow-hidden">
           <DRMShield userEmail={user.email} userId={user.id} />
 
-          {/* Center Stage Video Element */}
-          <div className="flex-1 rounded-3xl bg-[#09090B] border border-white/10 flex items-center justify-center relative overflow-hidden shadow-2xl min-h-[420px]">
-            {/* Real HTML5 Media Video Stream */}
-            <video
-              ref={videoRef}
-              autoPlay
-              playsInline
-              muted
-              className={cn(
-                "w-full h-full object-contain transition-opacity duration-300",
-                cameraOn || isScreenSharing ? "opacity-100" : "opacity-0 absolute"
+          {/* Browser Permission Alert if any */}
+          {streamError && (
+            <div className="mb-3 p-3 rounded-2xl bg-amber-950/80 border border-amber-500/40 text-amber-200 text-xs flex items-center gap-2.5 backdrop-blur-md">
+              <AlertCircle className="w-4 h-4 text-amber-400 shrink-0" />
+              <span>Camera Notice: {streamError} — Allow camera permissions to broadcast your live feed.</span>
+            </div>
+          )}
+
+          {/* MODE A: SPOTLIGHT VIEW (1 Main Large Stage + Bottom Participant Strip) */}
+          {viewMode === "spotlight" && (
+            <div className="flex-1 flex flex-col min-h-0 gap-4">
+              {/* Main Spotlight Video */}
+              <div className="flex-1 min-h-[340px] rounded-3xl overflow-hidden shadow-2xl relative">
+                {isLocalSpotlight ? (
+                  <VideoTile
+                    stream={localStream}
+                    name={user.name || user.email}
+                    isLocal={true}
+                    isInstructor={isInstructor}
+                    micOn={micOn}
+                    cameraOn={cameraOn || isScreenSharing}
+                    handRaised={handRaised}
+                    isSpotlight={true}
+                    className="w-full h-full"
+                  />
+                ) : (
+                  <VideoTile
+                    stream={remoteStreams.get(spotlightAttendee!.id) || null}
+                    name={spotlightAttendee!.name}
+                    isLocal={false}
+                    isInstructor={spotlightAttendee!.role === "INSTRUCTOR"}
+                    micOn={peerStatuses.get(spotlightAttendee!.id)?.micOn ?? true}
+                    cameraOn={peerStatuses.get(spotlightAttendee!.id)?.cameraOn ?? true}
+                    handRaised={peerStatuses.get(spotlightAttendee!.id)?.handRaised ?? false}
+                    isSpotlight={true}
+                    onPin={() => setSpotlightUserId(null)}
+                    className="w-full h-full"
+                  />
+                )}
+              </div>
+
+              {/* Bottom Filmstrip for Other Participants */}
+              {totalParticipants > 1 && (
+                <div className="h-32 flex items-center gap-3 overflow-x-auto pb-1 shrink-0">
+                  {/* Local tile thumbnail if not spotlighted */}
+                  {!isLocalSpotlight && (
+                    <div className="w-44 h-full shrink-0">
+                      <VideoTile
+                        stream={localStream}
+                        name={user.name || user.email}
+                        isLocal={true}
+                        isInstructor={isInstructor}
+                        micOn={micOn}
+                        cameraOn={cameraOn || isScreenSharing}
+                        handRaised={handRaised}
+                        onPin={() => setSpotlightUserId(user.id)}
+                        className="w-full h-full cursor-pointer hover:border-emerald-400"
+                      />
+                    </div>
+                  )}
+
+                  {/* Remote attendees thumbnails */}
+                  {otherAttendees.map((att) => {
+                    if (att.id === spotlightUserId) return null;
+                    const rStream = remoteStreams.get(att.id) || null;
+                    const pStatus = peerStatuses.get(att.id);
+
+                    return (
+                      <div key={att.id} className="w-44 h-full shrink-0">
+                        <VideoTile
+                          stream={rStream}
+                          name={att.name}
+                          isLocal={false}
+                          isInstructor={att.role === "INSTRUCTOR"}
+                          micOn={pStatus?.micOn ?? true}
+                          cameraOn={pStatus?.cameraOn ?? true}
+                          handRaised={pStatus?.handRaised ?? false}
+                          onPin={() => setSpotlightUserId(att.id)}
+                          className="w-full h-full cursor-pointer hover:border-emerald-400"
+                        />
+                      </div>
+                    );
+                  })}
+                </div>
               )}
-            />
+            </div>
+          )}
 
-            {/* Fallback Display if Camera is Off and Not Screen Sharing */}
-            {!cameraOn && !isScreenSharing && (
-              <div className="text-center space-y-4 p-8">
-                <div className="w-24 h-24 mx-auto rounded-full bg-[#18181B] border-2 border-white/20 flex items-center justify-center text-3xl font-extrabold text-white shadow-xl">
-                  {user.name ? user.name.charAt(0).toUpperCase() : user.email.charAt(0).toUpperCase()}
-                </div>
-                <div className="space-y-1">
-                  <h3 className="text-lg font-bold text-white">{session.title}</h3>
-                  <p className="text-xs text-[#71717A]">Camera is muted. Microphone is {micOn ? "active" : "muted"}.</p>
-                </div>
-              </div>
-            )}
+          {/* MODE B: GALLERY GRID VIEW (Zoom / Google Meet Style Symmetrical Grid) */}
+          {viewMode === "grid" && (
+            <div
+              className={cn(
+                "flex-1 grid gap-4 p-1 min-h-[380px] auto-rows-fr",
+                totalParticipants === 1 && "grid-cols-1",
+                totalParticipants === 2 && "grid-cols-1 sm:grid-cols-2",
+                totalParticipants >= 3 && totalParticipants <= 4 && "grid-cols-2",
+                totalParticipants >= 5 && totalParticipants <= 6 && "grid-cols-2 md:grid-cols-3",
+                totalParticipants > 6 && "grid-cols-2 sm:grid-cols-3 md:grid-cols-4"
+              )}
+            >
+              {/* Local User Tile */}
+              <VideoTile
+                stream={localStream}
+                name={user.name || user.email}
+                isLocal={true}
+                isInstructor={isInstructor}
+                micOn={micOn}
+                cameraOn={cameraOn || isScreenSharing}
+                handRaised={handRaised}
+                onPin={() => {
+                  setSpotlightUserId(user.id);
+                  setViewMode("spotlight");
+                }}
+                className="w-full h-full"
+              />
 
-            {/* Browser Permission Info Notification */}
-            {streamError && (
-              <div className="absolute top-4 left-4 right-4 max-w-md mx-auto p-3 rounded-2xl bg-amber-950/80 border border-amber-500/40 text-amber-200 text-xs flex items-center gap-2.5 backdrop-blur-md">
-                <AlertCircle className="w-4 h-4 text-amber-400 shrink-0" />
-                <span>Camera/Mic note: {streamError} (Grant browser permissions to broadcast your video).</span>
-              </div>
-            )}
+              {/* Remote Attendees Tiles */}
+              {otherAttendees.map((att) => {
+                const rStream = remoteStreams.get(att.id) || null;
+                const pStatus = peerStatuses.get(att.id);
 
-            {/* Hand Raised Banner */}
-            {handRaised && (
-              <div className="absolute top-4 right-4 px-3.5 py-1.5 rounded-full bg-amber-400 text-black text-xs font-bold flex items-center gap-1.5 shadow-xl animate-bounce">
-                <Hand className="w-3.5 h-3.5" />
-                <span>Hand Raised</span>
-              </div>
-            )}
+                return (
+                  <VideoTile
+                    key={att.id}
+                    stream={rStream}
+                    name={att.name}
+                    isLocal={false}
+                    isInstructor={att.role === "INSTRUCTOR"}
+                    micOn={pStatus?.micOn ?? true}
+                    cameraOn={pStatus?.cameraOn ?? true}
+                    handRaised={pStatus?.handRaised ?? false}
+                    onPin={() => {
+                      setSpotlightUserId(att.id);
+                      setViewMode("spotlight");
+                    }}
+                    className="w-full h-full"
+                  />
+                );
+              })}
+            </div>
+          )}
 
-            {/* Active Screen Sharing Indicator */}
-            {isScreenSharing && (
-              <div className="absolute top-4 left-4 px-3 py-1.5 rounded-full bg-emerald-500 text-black text-xs font-bold flex items-center gap-1.5 shadow-xl">
-                <Monitor className="w-3.5 h-3.5" />
-                <span>Broadcasting Screen</span>
-              </div>
-            )}
-          </div>
-
-          {/* Bottom Stage Control Bar */}
-          <div className="mt-4 flex items-center justify-center gap-3 p-3 rounded-2xl bg-white/5 border border-white/10 backdrop-blur-md max-w-fit mx-auto">
+          {/* Bottom Floating Classroom Control Bar */}
+          <div className="mt-4 flex items-center justify-center gap-3 p-3 rounded-2xl bg-[#18181B]/80 border border-white/10 backdrop-blur-xl max-w-fit mx-auto shadow-2xl">
             {/* Mic Toggle */}
             <button
               type="button"
@@ -403,7 +755,7 @@ export function LiveRoomClient({
               {cameraOn ? <Video className="w-5 h-5" /> : <VideoOff className="w-5 h-5" />}
             </button>
 
-            {/* Real Screen Share Toggle */}
+            {/* Screen Sharing Toggle */}
             <button
               type="button"
               onClick={toggleScreenShare}
@@ -413,7 +765,7 @@ export function LiveRoomClient({
                   ? "bg-emerald-500 text-black font-bold shadow-lg"
                   : "bg-white/10 text-white hover:bg-white/20"
               )}
-              title={isScreenSharing ? "Stop Sharing Screen" : "Share Window or Display"}
+              title={isScreenSharing ? "Stop Sharing Screen" : "Share Screen"}
             >
               <Monitor className="w-5 h-5" />
             </button>
@@ -421,7 +773,7 @@ export function LiveRoomClient({
             {/* Raise Hand Toggle */}
             <button
               type="button"
-              onClick={() => setHandRaised(!handRaised)}
+              onClick={toggleHandRaise}
               className={cn(
                 "p-3 rounded-xl transition-all",
                 handRaised ? "bg-amber-400 text-black font-bold shadow-lg" : "bg-white/10 text-white hover:bg-white/20"
@@ -430,10 +782,22 @@ export function LiveRoomClient({
             >
               <Hand className="w-5 h-5" />
             </button>
+
+            <div className="h-6 w-px bg-white/20 mx-1" />
+
+            {/* Layout Mode Switcher (Grid vs Spotlight) */}
+            <button
+              type="button"
+              onClick={() => setViewMode(viewMode === "spotlight" ? "grid" : "spotlight")}
+              className="p-3 rounded-xl bg-white/10 text-white hover:bg-white/20 transition-all"
+              title={viewMode === "spotlight" ? "Switch to Gallery Grid View" : "Switch to Spotlight Speaker View"}
+            >
+              {viewMode === "spotlight" ? <LayoutGrid className="w-5 h-5" /> : <Maximize2 className="w-5 h-5" />}
+            </button>
           </div>
         </div>
 
-        {/* Right 3/4 Columns: Live Chat & Real Database Attendees Panel */}
+        {/* Right 3/4 Columns: Live Chat & Real Attendees Panel */}
         <div className="lg:col-span-4 xl:col-span-3 border-l border-[#27272A] bg-[#09090B] flex flex-col justify-between h-[calc(100vh-64px)]">
           {/* Panel Tabs */}
           <div className="p-3 border-b border-[#27272A] flex items-center gap-2">
@@ -455,11 +819,11 @@ export function LiveRoomClient({
                 activeSideTab === "attendees" ? "bg-white text-black" : "text-[#71717A] hover:text-white"
               )}
             >
-              Attendees ({Math.max(attendees.length, 1)})
+              Attendees ({totalParticipants})
             </button>
           </div>
 
-          {/* Tab 1: Real Persistent Live Chat Stream */}
+          {/* Tab 1: Live Chat Stream */}
           {activeSideTab === "chat" && (
             <>
               <div className="flex-1 p-4 overflow-y-auto space-y-3 font-sans">
@@ -510,10 +874,10 @@ export function LiveRoomClient({
             </>
           )}
 
-          {/* Tab 2: Real Database Attendees List */}
+          {/* Tab 2: Attendees List with Live Status */}
           {activeSideTab === "attendees" && (
             <div className="flex-1 p-4 overflow-y-auto space-y-2">
-              {/* Current User */}
+              {/* Local User */}
               <div className="p-2.5 rounded-xl bg-white/5 border border-white/10 flex items-center justify-between text-xs">
                 <div className="flex items-center gap-2">
                   <div className="w-6 h-6 rounded-full bg-emerald-500 text-black flex items-center justify-center font-bold text-[10px]">
@@ -522,14 +886,14 @@ export function LiveRoomClient({
                   <span className="font-bold text-white">{user.name || user.email} (You)</span>
                 </div>
                 <Badge variant="mint" className="text-[9px] uppercase font-bold">
-                  {isInstructor ? "Host" : "Participant"}
+                  {isInstructor ? "Host" : "Student"}
                 </Badge>
               </div>
 
-              {/* Other Real Database Attendees */}
-              {attendees
-                .filter((a) => a.id !== user.id)
-                .map((attendee) => (
+              {/* Remote Attendees */}
+              {otherAttendees.map((attendee) => {
+                const pStatus = peerStatuses.get(attendee.id);
+                return (
                   <div
                     key={attendee.id}
                     className="p-2.5 rounded-xl bg-white/5 border border-white/5 flex items-center justify-between text-xs"
@@ -539,15 +903,25 @@ export function LiveRoomClient({
                         {attendee.name.charAt(0).toUpperCase()}
                       </div>
                       <div className="space-y-0.5">
-                        <span className="text-[#E4E4E7] font-medium block">{attendee.name}</span>
+                        <div className="flex items-center gap-1.5">
+                          <span className="text-[#E4E4E7] font-medium">{attendee.name}</span>
+                          {pStatus?.handRaised && <Hand className="w-3 h-3 text-amber-400 animate-bounce" />}
+                        </div>
                         <span className="text-[10px] text-[#71717A] block">{attendee.email}</span>
                       </div>
                     </div>
-                    <Badge variant="outline" className="text-[9px] uppercase text-[#A1A1AA] border-white/10">
-                      {attendee.role || "Student"}
-                    </Badge>
+
+                    <div className="flex items-center gap-2">
+                      <span className="text-[#A1A1AA]">
+                        {pStatus?.micOn ? <Mic className="w-3 h-3 text-emerald-400" /> : <MicOff className="w-3 h-3 text-red-500" />}
+                      </span>
+                      <Badge variant="outline" className="text-[9px] uppercase text-[#A1A1AA] border-white/10">
+                        {attendee.role || "Student"}
+                      </Badge>
+                    </div>
                   </div>
-                ))}
+                );
+              })}
             </div>
           )}
         </div>

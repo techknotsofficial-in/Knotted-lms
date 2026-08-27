@@ -377,6 +377,20 @@ model LiveMessage {
   @@map("live_messages")
 }
 
+model LiveSignal {
+  id            String      @id @default(cuid())
+  liveSessionId String
+  senderId      String
+  receiverId    String?     // null indicates broadcast to all peers
+  type          String      // "join" | "offer" | "answer" | "candidate" | "leave"
+  payload       String      @db.Text
+  createdAt     DateTime    @default(now())
+
+  @@index([liveSessionId, receiverId])
+  @@index([liveSessionId, senderId])
+  @@map("live_signals")
+}
+
 model WebhookLog {
   id        String   @id @default(cuid())
   eventId   String   @unique
