@@ -32,7 +32,6 @@ import {
   Maximize2,
   Pin,
   Sparkles,
-  RefreshCw,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -76,7 +75,7 @@ interface LiveRoomClientProps {
   isInstructor: boolean;
 }
 
-// Enterprise-grade STUN + Open TURN relays (Bypasses Carrier-Grade Mobile NAT & firewalls)
+// Enterprise STUN & Open TURN Relays
 const ICE_SERVERS: RTCConfiguration = {
   iceServers: [
     { urls: "stun:stun.l.google.com:19302" },
@@ -103,7 +102,6 @@ const ICE_SERVERS: RTCConfiguration = {
   iceCandidatePoolSize: 10,
 };
 
-// Sub-component for individual participant video box
 function VideoTile({
   stream,
   name,
@@ -138,7 +136,7 @@ function VideoTile({
     }
   }, [stream]);
 
-  // Audio level analyser for speaking green ring
+  // Audio level analyser for active speaker green ring
   useEffect(() => {
     if (!stream || !micOn) {
       setIsSpeaking(false);
@@ -205,7 +203,7 @@ function VideoTile({
         )}
       />
 
-      {/* Fallback Display when Camera is turned off OR connecting */}
+      {/* Fallback Display */}
       {!showLiveVideo && (
         <div className="flex flex-col items-center justify-center p-4 space-y-3">
           <div className="w-16 h-16 sm:w-20 sm:h-20 rounded-full bg-[#27272A] border-2 border-white/20 flex items-center justify-center text-xl sm:text-2xl font-black text-white shadow-xl">
@@ -224,7 +222,7 @@ function VideoTile({
         </div>
       )}
 
-      {/* Pin / Spotlight button on hover */}
+      {/* Pin / Spotlight button */}
       {onPin && (
         <button
           type="button"
@@ -236,7 +234,7 @@ function VideoTile({
         </button>
       )}
 
-      {/* Hand Raised Floating Badge */}
+      {/* Hand Raised Badge */}
       {handRaised && (
         <div className="absolute top-3 left-3 px-2.5 py-1 rounded-full bg-amber-400 text-black text-[11px] font-bold flex items-center gap-1 shadow-lg animate-bounce z-10">
           <Hand className="w-3 h-3" />
@@ -295,10 +293,9 @@ export function LiveRoomClient({
   const [spotlightUserId, setSpotlightUserId] = useState<string | null>(null);
   const [activeSideTab, setActiveSideTab] = useState<"chat" | "attendees">("chat");
 
-  // Notifications
   const [roomNotification, setRoomNotification] = useState<string | null>(null);
 
-  // WebRTC Remote Peer Connections, Streams & ICE Queues
+  // WebRTC Remote Peer Connections & Streams
   const peerConnections = useRef<Map<string, RTCPeerConnection>>(new Map());
   const iceCandidateQueue = useRef<Map<string, RTCIceCandidateInit[]>>(new Map());
   const [remoteStreams, setRemoteStreams] = useState<Map<string, MediaStream>>(new Map());
@@ -314,7 +311,7 @@ export function LiveRoomClient({
   const [isSending, setIsSending] = useState(false);
 
   const chatBottomRef = useRef<HTMLDivElement>(null);
-  const lastSignalTimeRef = useRef<string>(new Date(Date.now() - 15000).toISOString());
+  const lastSignalTimeRef = useRef<string>(new Date(Date.now() - 20000).toISOString());
 
   const triggerNotification = (text: string) => {
     setRoomNotification(text);
@@ -334,7 +331,7 @@ export function LiveRoomClient({
 
       const pc = new RTCPeerConnection(ICE_SERVERS);
 
-      // Add local stream tracks
+      // Add local stream tracks immediately if available
       const stream = screenStreamRef.current || localStreamRef.current;
       if (stream) {
         stream.getTracks().forEach((track) => {
@@ -346,10 +343,18 @@ export function LiveRoomClient({
 
       // Handle receiving remote tracks
       pc.ontrack = (event) => {
-        const rStream = event.streams[0] || new MediaStream([event.track]);
+        const rStream = event.streams && event.streams[0] ? event.streams[0] : new MediaStream([event.track]);
         setRemoteStreams((prev) => {
           const next = new Map(prev);
-          next.set(peerId, rStream);
+          const existing = next.get(peerId);
+          if (existing) {
+            if (!existing.getTracks().some((t) => t.id === event.track.id)) {
+              existing.addTrack(event.track);
+            }
+            next.set(peerId, existing);
+          } else {
+            next.set(peerId, rStream);
+          }
           return next;
         });
       };
@@ -383,11 +388,24 @@ export function LiveRoomClient({
     [session.id]
   );
 
-  // Send an Offer to a specific peer
+  // Send Offer (Deterministic: Only initiated when polite condition met or requested)
   const sendOffer = useCallback(
     async (peerId: string) => {
       try {
         const pc = getOrCreatePeerConnection(peerId);
+        // Ensure local tracks are attached before creating offer
+        const stream = screenStreamRef.current || localStreamRef.current;
+        if (stream) {
+          stream.getTracks().forEach((track) => {
+            const senders = pc.getSenders();
+            if (!senders.some((s) => s.track?.kind === track.kind)) {
+              try {
+                pc.addTrack(track, stream);
+              } catch {}
+            }
+          });
+        }
+
         const offer = await pc.createOffer({
           offerToReceiveAudio: true,
           offerToReceiveVideo: true,
@@ -395,7 +413,7 @@ export function LiveRoomClient({
         await pc.setLocalDescription(offer);
         await sendLiveSignalAction(session.id, peerId, "offer", JSON.stringify(offer));
       } catch (err) {
-        console.warn("Failed to send offer:", err);
+        console.warn("Failed to create offer:", err);
       }
     },
     [getOrCreatePeerConnection, session.id]
@@ -409,11 +427,10 @@ export function LiveRoomClient({
         throw new Error("Camera/Mic not supported by this browser.");
       }
 
-      // Flexible mobile-friendly constraints
       let stream: MediaStream;
       try {
         stream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: "user" },
+          video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: "user" },
           audio: true,
         });
       } catch {
@@ -425,6 +442,18 @@ export function LiveRoomClient({
 
       localStreamRef.current = stream;
       setLocalStream(stream);
+
+      // Attach tracks to any already created peer connections
+      peerConnections.current.forEach((pc) => {
+        stream.getTracks().forEach((track) => {
+          const senders = pc.getSenders();
+          if (!senders.some((s) => s.track?.kind === track.kind)) {
+            try {
+              pc.addTrack(track, stream);
+            } catch {}
+          }
+        });
+      });
 
       // Announce join to peers in the room
       await sendLiveSignalAction(session.id, null, "join", JSON.stringify({ name: user.name || user.email }));
@@ -463,7 +492,7 @@ export function LiveRoomClient({
     };
   }, [initMedia, session.id]);
 
-  // 2. Realtime WebRTC Fast Signaling Polling (Every 1s with Candidate Queueing)
+  // 2. Realtime WebRTC Fast Signaling Polling with Glare Prevention
   useEffect(() => {
     const signalInterval = setInterval(async () => {
       try {
@@ -477,7 +506,11 @@ export function LiveRoomClient({
             if (sig.type === "join") {
               const info = JSON.parse(sig.payload || "{}");
               triggerNotification(`👋 ${info.name || "A participant"} joined`);
-              await sendOffer(senderId);
+
+              // Glare Prevention: Peer with smaller ID initiates offer to peer with larger ID
+              if (user.id < senderId) {
+                await sendOffer(senderId);
+              }
               sendLiveSignalAction(
                 session.id,
                 senderId,
@@ -500,6 +533,20 @@ export function LiveRoomClient({
             } else if (sig.type === "offer") {
               const pc = getOrCreatePeerConnection(senderId);
               const offerData = JSON.parse(sig.payload);
+
+              // Attach local tracks before answering
+              const stream = screenStreamRef.current || localStreamRef.current;
+              if (stream) {
+                stream.getTracks().forEach((track) => {
+                  const senders = pc.getSenders();
+                  if (!senders.some((s) => s.track?.kind === track.kind)) {
+                    try {
+                      pc.addTrack(track, stream);
+                    } catch {}
+                  }
+                });
+              }
+
               await pc.setRemoteDescription(new RTCSessionDescription(offerData));
 
               // Process queued candidates
@@ -515,7 +562,7 @@ export function LiveRoomClient({
             } else if (sig.type === "answer") {
               const pc = getOrCreatePeerConnection(senderId);
               const answerData = JSON.parse(sig.payload);
-              if (pc.signalingState !== "stable") {
+              if (pc.signalingState === "have-local-offer") {
                 await pc.setRemoteDescription(new RTCSessionDescription(answerData));
                 const queued = iceCandidateQueue.current.get(senderId) || [];
                 for (const cand of queued) {
@@ -543,7 +590,7 @@ export function LiveRoomClient({
     }, 1000);
 
     return () => clearInterval(signalInterval);
-  }, [session.id, sendOffer, getOrCreatePeerConnection, micOn, cameraOn, handRaised]);
+  }, [session.id, sendOffer, getOrCreatePeerConnection, micOn, cameraOn, handRaised, user.id]);
 
   // 3. Database State Polling (Every 3s)
   useEffect(() => {
@@ -559,18 +606,18 @@ export function LiveRoomClient({
     return () => clearInterval(interval);
   }, [session.id]);
 
-  // Periodic Re-sync: if an attendee is present but stream not connected yet, ping offer
+  // Auto self-healing ping: re-negotiate if attendee exists but stream is not flowing yet
   useEffect(() => {
     const pingInterval = setInterval(() => {
       otherAttendees.forEach((att) => {
-        if (!remoteStreams.has(att.id)) {
+        if (!remoteStreams.has(att.id) && user.id < att.id) {
           sendOffer(att.id);
         }
       });
-    }, 4000);
+    }, 3500);
 
     return () => clearInterval(pingInterval);
-  }, [attendees, remoteStreams, sendOffer]);
+  }, [attendees, remoteStreams, sendOffer, user.id]);
 
   // Controls: Mic Toggle
   function toggleMicrophone() {
@@ -696,7 +743,7 @@ export function LiveRoomClient({
 
   return (
     <div className="min-h-screen flex flex-col bg-[#09090B] text-white select-none overflow-hidden font-sans">
-      {/* Live Toast Joining/Exiting Banner */}
+      {/* Live Toast Notification */}
       {roomNotification && (
         <div className="fixed top-20 left-1/2 -translate-x-1/2 z-50 px-4 py-2 rounded-2xl bg-black/80 border border-white/20 text-white text-xs font-bold backdrop-blur-xl shadow-2xl animate-fade-in flex items-center gap-2">
           <Sparkles className="w-3.5 h-3.5 text-emerald-400" />
