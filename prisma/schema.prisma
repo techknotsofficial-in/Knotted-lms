@@ -1,0 +1,390 @@
+// Knotted LMS Prisma Schema
+// Compatible with Neon Serverless Postgres / Supabase & Better Auth
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+// -----------------------------------------------------------------------------
+// 1. AUTHENTICATION & USER MANAGEMENT (Better Auth Compatible)
+// -----------------------------------------------------------------------------
+
+enum UserRole {
+  STUDENT
+  INSTRUCTOR
+  ADMIN
+}
+
+model User {
+  id            String    @id @default(cuid())
+  name          String?
+  email         String    @unique
+  emailVerified Boolean   @default(false)
+  image         String?
+  role          UserRole  @default(STUDENT)
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  // Better Auth Relations
+  sessions      Session[]
+  accounts      Account[]
+
+  // LMS Relations
+  createdCourses Course[]       @relation("InstructorCourses")
+  enrollments    Enrollment[]
+  progress       UserProgress[]
+  badges         UserBadge[]
+  certificates   Certificate[]
+  attendances    LiveAttendee[]
+  liveMessages   LiveMessage[]
+
+  @@map("users")
+}
+
+model Session {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  token     String   @unique
+  expiresAt DateTime
+  ipAddress String?
+  userAgent String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("sessions")
+}
+
+model Account {
+  id                    String    @id @default(cuid())
+  userId                String
+  user                  User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  accountId             String
+  providerId            String
+  accessToken           String?   @db.Text
+  refreshToken          String?   @db.Text
+  idToken               String?   @db.Text
+  accessTokenExpiresAt  DateTime?
+  refreshTokenExpiresAt DateTime?
+  scope                 String?
+  password              String?
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+
+  @@unique([providerId, accountId])
+  @@map("accounts")
+}
+
+model Verification {
+  id         String   @id @default(cuid())
+  identifier String
+  value      String
+  expiresAt  DateTime
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@unique([identifier, value])
+  @@map("verifications")
+}
+
+// -----------------------------------------------------------------------------
+// 2. COURSE HIERARCHY (Courses -> Chapters -> Lessons)
+// -----------------------------------------------------------------------------
+
+enum CourseLevel {
+  BEGINNER
+  INTERMEDIATE
+  ADVANCED
+  ALL_LEVELS
+}
+
+model Course {
+  id           String      @id @default(cuid())
+  title        String
+  slug         String      @unique
+  subtitle     String?     @db.VarChar(255)
+  description  String?     @db.Text
+  thumbnailUrl String?
+  previewVideo String?
+  price        Decimal     @default(0.00) @db.Decimal(10, 2)
+  currency     String      @default("INR")
+  level        CourseLevel @default(ALL_LEVELS)
+  isPublished  Boolean     @default(false)
+  category     String      @default("Development")
+
+  instructorId String
+  instructor   User        @relation("InstructorCourses", fields: [instructorId], references: [id], onDelete: Cascade)
+
+  chapters     Chapter[]
+  enrollments  Enrollment[]
+  liveSessions LiveSession[]
+  certificates Certificate[]
+
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @updatedAt
+
+  @@index([instructorId])
+  @@index([isPublished])
+  @@map("courses")
+}
+
+model Chapter {
+  id          String   @id @default(cuid())
+  title       String
+  description String?  @db.Text
+  sortOrder   Int      @default(0)
+  isPublished Boolean  @default(true)
+  
+  courseId    String
+  course      Course   @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  
+  lessons     Lesson[]
+  
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([courseId])
+  @@map("chapters")
+}
+
+enum LessonType {
+  VIDEO
+  TEXT
+  LIVE
+  QUIZ
+}
+
+model Lesson {
+  id             String             @id @default(cuid())
+  title          String
+  slug           String
+  type           LessonType         @default(VIDEO)
+  content        String?            @db.Text
+  videoUrl       String?
+  durationSec    Int                @default(0)
+  sortOrder      Int                @default(0)
+  isFree         Boolean            @default(false)
+  isPublished    Boolean            @default(true)
+
+  chapterId      String
+  chapter        Chapter            @relation(fields: [chapterId], references: [id], onDelete: Cascade)
+  
+  attachments    LessonAttachment[]
+  userProgresses UserProgress[]
+
+  createdAt      DateTime           @default(now())
+  updatedAt      DateTime           @updatedAt
+
+  @@index([chapterId])
+  @@map("lessons")
+}
+
+model LessonAttachment {
+  id        String   @id @default(cuid())
+  name      String
+  fileUrl   String
+  fileSize  Int      @default(0)
+  mimeType  String?
+  
+  lessonId  String
+  lesson    Lesson   @relation(fields: [lessonId], references: [id], onDelete: Cascade)
+  
+  createdAt DateTime @default(now())
+
+  @@index([lessonId])
+  @@map("lesson_attachments")
+}
+
+// -----------------------------------------------------------------------------
+// 3. ENROLLMENTS, PAYMENTS & PROGRESS ENGINE
+// -----------------------------------------------------------------------------
+
+enum EnrollmentStatus {
+  ACTIVE
+  REVOKED
+  EXPIRED
+}
+
+model Enrollment {
+  id        String           @id @default(cuid())
+  userId    String
+  courseId  String
+  user      User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  course    Course           @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  
+  paymentId String?          @unique
+  payment   Payment?         @relation(fields: [paymentId], references: [id])
+  
+  status    EnrollmentStatus @default(ACTIVE)
+  createdAt DateTime         @default(now())
+  updatedAt DateTime         @updatedAt
+
+  @@unique([userId, courseId])
+  @@index([userId])
+  @@index([courseId])
+  @@map("enrollments")
+}
+
+enum PaymentStatus {
+  PENDING
+  SUCCESS
+  FAILED
+  REFUNDED
+}
+
+model Payment {
+  id                String        @id @default(cuid())
+  razorpayOrderId   String        @unique
+  razorpayPaymentId String?       @unique
+  razorpaySignature String?
+  amount            Decimal       @db.Decimal(10, 2)
+  currency          String        @default("INR")
+  status            PaymentStatus @default(PENDING)
+  
+  enrollment        Enrollment?
+  
+  createdAt         DateTime      @default(now())
+  updatedAt         DateTime      @updatedAt
+
+  @@map("payments")
+}
+
+model UserProgress {
+  id             String   @id @default(cuid())
+  userId         String
+  lessonId       String
+  user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  lesson         Lesson   @relation(fields: [lessonId], references: [id], onDelete: Cascade)
+  
+  isCompleted    Boolean  @default(false)
+  lastWatchedSec Int      @default(0)
+  watchedPercent Int      @default(0)
+  completedAt    DateTime?
+  
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@unique([userId, lessonId])
+  @@index([userId])
+  @@index([lessonId])
+  @@map("user_progresses")
+}
+
+// -----------------------------------------------------------------------------
+// 4. GAMIFICATION (Badges & Dynamic Certificates)
+// -----------------------------------------------------------------------------
+
+model Badge {
+  id          String      @id @default(cuid())
+  code        String      @unique // e.g. FIRST_KNOT, SPEED_LEARNER, MASTER_KNOT
+  title       String
+  description String
+  iconName    String      @default("Award")
+  rarity      String      @default("COMMON") // COMMON, RARE, EPIC, LEGENDARY
+  
+  userBadges  UserBadge[]
+
+  createdAt   DateTime    @default(now())
+
+  @@map("badges")
+}
+
+model UserBadge {
+  id        String   @id @default(cuid())
+  userId    String
+  badgeId   String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  badge     Badge    @relation(fields: [badgeId], references: [id], onDelete: Cascade)
+  
+  awardedAt DateTime @default(now())
+
+  @@unique([userId, badgeId])
+  @@map("user_badges")
+}
+
+model Certificate {
+  id            String   @id @default(cuid())
+  certificateNo String   @unique // e.g. KNOT-2026-89412
+  userId        String
+  courseId      String
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  course        Course   @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  
+  pdfUrl        String?
+  issuedAt      DateTime @default(now())
+
+  @@unique([userId, courseId])
+  @@map("certificates")
+}
+
+// -----------------------------------------------------------------------------
+// 5. LIVE COHORT SESSIONS & WEBHOOK LOGS
+// -----------------------------------------------------------------------------
+
+model LiveSession {
+  id          String         @id @default(cuid())
+  courseId    String
+  course      Course         @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  
+  title       String
+  description String?        @db.Text
+  scheduledAt DateTime
+  durationMin Int            @default(60)
+  roomToken   String         @unique
+  isLive      Boolean        @default(false)
+  isEnded     Boolean        @default(false)
+  
+  attendees   LiveAttendee[]
+  messages    LiveMessage[]
+
+  createdAt   DateTime       @default(now())
+  updatedAt   DateTime       @updatedAt
+
+  @@index([courseId])
+  @@map("live_sessions")
+}
+
+model LiveAttendee {
+  id            String      @id @default(cuid())
+  liveSessionId String
+  userId        String
+  liveSession   LiveSession @relation(fields: [liveSessionId], references: [id], onDelete: Cascade)
+  user          User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  joinedAt      DateTime    @default(now())
+
+  @@unique([liveSessionId, userId])
+  @@map("live_attendees")
+}
+
+model LiveMessage {
+  id            String      @id @default(cuid())
+  liveSessionId String
+  liveSession   LiveSession @relation(fields: [liveSessionId], references: [id], onDelete: Cascade)
+  userId        String
+  user          User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  text          String      @db.Text
+  createdAt     DateTime    @default(now())
+
+  @@index([liveSessionId])
+  @@map("live_messages")
+}
+
+model WebhookLog {
+  id        String   @id @default(cuid())
+  eventId   String   @unique
+  provider  String   @default("RAZORPAY")
+  event     String
+  payload   Json
+  processed Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  @@map("webhook_logs")
+}

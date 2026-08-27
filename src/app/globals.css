@@ -1,26 +1,122 @@
 @import "tailwindcss";
 
-:root {
-  --background: #ffffff;
-  --foreground: #171717;
-}
-
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
-}
-
-@media (prefers-color-scheme: dark) {
+@layer base {
   :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
+    --background: 0 0% 98%; /* #FAFAFA Clean Minimal Background */
+    --foreground: 240 10% 4%; /* #09090B Rich Black */
+    
+    --card: 0 0% 100%; /* #FFFFFF Pure White */
+    --card-foreground: 240 10% 4%;
+    
+    --popover: 0 0% 100%;
+    --popover-foreground: 240 10% 4%;
+    
+    --primary: 240 10% 4%; /* #09090B Black Primary */
+    --primary-foreground: 0 0% 100%; /* #FFFFFF */
+    
+    --secondary: 240 5% 96%; /* #F4F4F5 Light Grey */
+    --secondary-foreground: 240 10% 4%;
+    
+    --muted: 240 5% 96%; /* #F4F4F5 */
+    --muted-foreground: 240 4% 46%; /* #71717A Neutral Grey */
+    
+    --accent: 240 5% 96%; /* #F4F4F5 */
+    --accent-foreground: 240 10% 4%;
+    
+    --destructive: 0 84% 60%;
+    --destructive-foreground: 0 0% 100%;
+    
+    --border: 240 6% 90%; /* #E4E4E7 Subtle Border */
+    --input: 240 6% 90%;
+    --ring: 240 10% 4%;
+    
+    --radius: 0.875rem;
+
+    /* Monochrome Design Tokens */
+    --knotted-black: #09090B;
+    --knotted-charcoal: #18181B;
+    --knotted-dark-grey: #27272A;
+    --knotted-mid-grey: #71717A;
+    --knotted-light-grey: #E4E4E7;
+    --knotted-soft-grey: #F4F4F5;
+    --knotted-white: #FFFFFF;
+    --knotted-cream-bg: #FAFAFA;
+    --knotted-cream-card: #FFFFFF;
+    --knotted-cream-border: #E4E4E7;
+  }
+
+  .dark {
+    --background: 240 10% 4%; /* #09090B */
+    --foreground: 0 0% 98%; /* #FAFAFA */
+    
+    --card: 240 10% 6%; /* #101014 */
+    --card-foreground: 0 0% 98%;
+    
+    --popover: 240 10% 6%;
+    --popover-foreground: 0 0% 98%;
+    
+    --primary: 0 0% 98%; /* #FAFAFA */
+    --primary-foreground: 240 10% 4%;
+    
+    --secondary: 240 4% 16%;
+    --secondary-foreground: 0 0% 98%;
+    
+    --muted: 240 4% 16%;
+    --muted-foreground: 240 5% 65%;
+    
+    --accent: 240 4% 16%;
+    --accent-foreground: 0 0% 98%;
+    
+    --destructive: 0 62% 40%;
+    --destructive-foreground: 0 0% 100%;
+    
+    --border: 240 4% 16%;
+    --input: 240 4% 16%;
+    --ring: 0 0% 98%;
   }
 }
 
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  background-color: var(--knotted-cream-bg);
+  color: var(--knotted-black);
+  font-feature-settings: "rlig" 1, "calt" 1;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Glass & UI Utilities */
+.glass-panel {
+  background: rgba(255, 255, 255, 0.9);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(228, 228, 231, 0.9);
+}
+
+.glass-panel-dark {
+  background: rgba(9, 9, 11, 0.9);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(39, 39, 42, 0.8);
+}
+
+.subtle-cream-shadow {
+  box-shadow: 0 10px 30px -10px rgba(0, 0, 0, 0.06), 0 4px 6px -2px rgba(0, 0, 0, 0.02);
+}
+
+/* Custom Scrollbars */
+::-webkit-scrollbar {
+  width: 7px;
+  height: 7px;
+}
+
+::-webkit-scrollbar-track {
+  background: #FAFAFA;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #D4D4D8;
+  border-radius: 9999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #71717A;
 }
